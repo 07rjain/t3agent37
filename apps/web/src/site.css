@@ -1,0 +1,1043 @@
+/* The site on the app's brand: pixel sea, square corners, 1px blue frames, hard shadows. */
+
+* {
+  box-sizing: border-box;
+}
+
+/* in-page links glide to their section */
+html {
+  scroll-behavior: smooth;
+}
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 400 16px/1.5 var(--font-body);
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+  padding: 0;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent-text);
+  outline-offset: 3px;
+}
+
+/* ── hero: the sea ─────────────────────────────────── */
+
+/* ends above the fold, so the page below shows */
+.hero {
+  --hero-shadow: var(--navy-800);
+  position: relative;
+  min-height: min(86svh, 800px);
+  /* the scene's least share of the hero */
+  padding-bottom: 260px;
+  overflow: hidden;
+  color: #fff;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hero {
+    --hero-shadow: var(--ocean);
+  }
+}
+
+.sea {
+  position: absolute;
+  inset: 0;
+}
+.sea canvas {
+  display: block;
+  image-rendering: pixelated;
+}
+
+.sea-tag {
+  position: absolute;
+  left: 0;
+  top: 0;
+  padding: 3px 6px 2px;
+  font: 400 12px/1 var(--font-mono);
+  white-space: nowrap;
+  background: var(--tag-bg);
+  color: var(--tag-fg);
+}
+.sea-tag.is-asleep {
+  background: var(--tag-dim-bg);
+  color: var(--tag-dim-fg);
+  letter-spacing: 0.06em;
+}
+
+.nav,
+.hero-copy {
+  position: relative;
+  width: min(1160px, 100% - 48px);
+  margin-inline: auto;
+}
+
+/* the bar in the sea's own terms: mono labels like the boats' tags, a button with the windows' hard shadow */
+.nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 88px;
+}
+
+.wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  font: 600 48px/1 var(--font-display);
+  letter-spacing: -0.03em;
+}
+
+.nav-links {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  font: 500 13px/1 var(--font-mono);
+}
+/* lit up like a tag on hover */
+.nav-links a {
+  padding: 7px 8px 6px;
+  color: rgb(255 255 255 / 0.82);
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+.nav-links a:hover {
+  background: var(--tag-bg);
+  color: var(--tag-fg);
+}
+
+/* pressed into its shadow */
+.nav-links .nav-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 14px;
+  background: var(--wash);
+  color: var(--ocean);
+  box-shadow: 4px 4px 0 var(--hero-shadow);
+  transition:
+    transform 120ms ease,
+    box-shadow 120ms ease;
+}
+.nav-links .nav-btn:hover {
+  background: var(--wash);
+  color: var(--ocean);
+  transform: translate(-1px, -1px);
+  box-shadow: 5px 5px 0 var(--hero-shadow);
+}
+.nav-links .nav-btn:active {
+  transform: translate(4px, 4px);
+  box-shadow: 0 0 0 var(--hero-shadow);
+}
+.nav-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* the button alone on phones */
+@media (max-width: 479px) {
+  .nav-links a:not(.nav-btn) {
+    display: none;
+  }
+}
+
+/* on plain sky: the hero draws its scene below this block */
+.hero-copy {
+  padding-block: clamp(56px, 13svh, 136px) 14px;
+}
+
+h1 {
+  width: fit-content;
+  max-width: 15em;
+  font: 500 clamp(38px, 5.8vw, 80px) / 1.05 var(--font-display);
+  letter-spacing: -0.03em;
+  text-wrap: balance;
+}
+
+/* the logos stand in for the names: cap height, on the baseline */
+.h1-t3 {
+  white-space: nowrap;
+}
+.h1-t3 svg,
+.h1-boat {
+  width: auto;
+}
+.h1-t3 svg {
+  height: 0.7em;
+  margin-right: 0.15em;
+}
+.h1-boat {
+  height: 1em;
+  margin-left: 0.04em;
+  vertical-align: -0.02em;
+}
+
+.hero-copy p {
+  width: fit-content;
+  margin-top: 26px;
+  max-width: 31em;
+  font-size: clamp(16px, 1.35vw, 18px);
+  line-height: 1.55;
+  color: rgb(255 255 255 / 0.92);
+  text-wrap: pretty;
+}
+
+/* the button, and beside it the systems it installs on */
+.hero-cta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px 24px;
+  margin-top: 28px;
+}
+.hero-cta .install {
+  margin-top: 0;
+}
+.hero-os {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: rgb(255 255 255 / 0.7);
+}
+.hero-os svg {
+  width: auto;
+  height: 14px;
+}
+
+/* ── the install button ────────────────────────────── */
+
+.install {
+  /* white on the day sky; on the night sky the ocean button stands out on its own */
+  --install-bg: var(--wash);
+  --install-hover: var(--blue-50);
+  --install-fg: var(--ocean);
+  --install-shadow: 4px 4px 0 var(--hero-shadow);
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 28px;
+  padding: 0 16px 0 14px;
+  height: 40px;
+  border: 0;
+  border-radius: 0;
+  background: var(--install-bg);
+  color: var(--install-fg);
+  box-shadow: var(--install-shadow);
+  font: 500 14px/1 var(--font-body);
+  cursor: pointer;
+  transition:
+    transform 120ms ease,
+    background-color 120ms ease;
+}
+@media (prefers-color-scheme: dark) {
+  .install {
+    --install-bg: var(--ocean);
+    --install-hover: var(--blue-500);
+    --install-fg: #fff;
+    --install-shadow: none;
+  }
+}
+.install:hover {
+  background: var(--install-hover);
+}
+.install:active {
+  transform: translateY(1px);
+}
+
+.install-icon {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+  shape-rendering: crispEdges;
+}
+.install-labels {
+  display: inline-grid;
+  text-align: left;
+}
+.install-label {
+  grid-area: 1 / 1;
+}
+.install-label,
+.install-icon path {
+  transition:
+    opacity 180ms ease,
+    transform 220ms cubic-bezier(0.3, 0.7, 0.4, 1);
+}
+.install-label + .install-label {
+  opacity: 0;
+  transform: translateY(8px);
+}
+.install-check,
+.install[data-state="copied"] .install-copy {
+  opacity: 0;
+}
+.install[data-state="copied"] .install-check {
+  opacity: 1;
+}
+.install:not([data-state="idle"]) .install-label:first-child {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+.install:not([data-state="idle"]) .install-label + .install-label {
+  opacity: 1;
+  transform: none;
+}
+
+/* ── the demo ──────────────────────────────────────── */
+
+.together {
+  scroll-margin-top: 24px;
+  width: min(1160px, 100% - 48px);
+  margin: 24px auto 0;
+  padding-bottom: 128px;
+}
+
+.eyebrow {
+  font: 400 13px/1 var(--font-mono);
+  color: var(--muted);
+}
+
+h2 {
+  margin-top: 14px;
+  font: 500 clamp(30px, 3.4vw, 46px) / 1.08 var(--font-display);
+  letter-spacing: -0.03em;
+  text-wrap: balance;
+}
+
+/* the bar, then the two windows */
+.stage {
+  position: relative;
+  display: grid;
+  grid-template: "now now" "t3 app" / minmax(0, 1fr) 382px;
+  column-gap: 48px;
+  margin-top: 36px;
+}
+.pane-t3 {
+  grid-area: t3;
+}
+.pane-app {
+  grid-area: app;
+}
+
+/* the round and where it stands, what is happening, and the visitor's move when it is theirs */
+.now {
+  grid-area: now;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px 20px;
+  /* the button's height, kept while a stage plays without one */
+  grid-template-rows: auto minmax(40px, auto);
+  margin-bottom: 14px;
+  padding: 14px 16px 12px;
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+/* the stages: a track each, full once passed, filling while one plays by itself */
+.now ol {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font: 400 12px/1 var(--font-mono);
+}
+.now li {
+  position: relative;
+  padding-top: 10px;
+  border-top: 3px solid color-mix(in srgb, var(--accent-fg) 28%, transparent);
+  opacity: 0.6;
+}
+.now li::before {
+  content: "";
+  position: absolute;
+  inset: -3px 0 auto;
+  height: 3px;
+  background: var(--accent-fg);
+  transform-origin: 0 50%;
+  transform: scaleX(0);
+}
+.now li[data-past]::before,
+.now li[aria-current]::before {
+  transform: none;
+}
+.now li[aria-current] {
+  opacity: 1;
+}
+.now li[style]::before {
+  animation: now-fill var(--ms) linear;
+}
+
+.now p {
+  font: 500 17px/1.3 var(--font-display);
+  animation: now-in var(--ocean-ease);
+}
+.now-window {
+  margin-right: 10px;
+  padding: 3px 6px 2px;
+  border: 1px solid;
+  font: 400 12px/1 var(--font-mono);
+  vertical-align: 2px;
+}
+/* the visitor's move: in the bar, and at the arrow where its spot is no control itself */
+.now button,
+.pointer button {
+  height: 40px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 0;
+  font: 600 15px/1 var(--font-display);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.now button::after,
+.pointer button::after {
+  content: " →";
+}
+.now button:disabled,
+.pointer button:disabled {
+  opacity: 0.5;
+  cursor: default;
+  animation: none;
+}
+.now button {
+  background: var(--accent-fg);
+  color: var(--accent);
+  animation: now-ask 1.6s ease-out infinite;
+}
+.now button:focus-visible {
+  outline-color: var(--accent-fg);
+  outline-offset: -5px;
+}
+@keyframes now-fill {
+  from {
+    transform: scaleX(0);
+  }
+}
+@keyframes now-ask {
+  from {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-fg) 70%, transparent);
+  }
+  to {
+    box-shadow: 0 0 0 9px transparent;
+  }
+}
+@keyframes now-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+/* both windows in the site's frame */
+.t3,
+.pane-app iframe {
+  display: block;
+  border: 1px solid var(--frame);
+  background: var(--bg);
+  box-shadow: 8px 8px 0 var(--shadow);
+  transition: outline-color 240ms ease;
+  outline: 1px solid transparent;
+}
+/* the popover's own 380 × 560 inside the frame */
+.pane-app iframe {
+  box-sizing: content-box;
+}
+
+/* the window to watch: a heavier frame, and in it an arrow at the spot */
+.stage[data-look="t3"] .t3,
+.stage[data-look="app"] .pane-app iframe {
+  border-color: var(--accent);
+  outline-color: var(--accent);
+}
+.pointer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+}
+.pointer > svg {
+  display: block;
+  width: 50px;
+  height: 50px;
+  fill: var(--danger);
+  stroke: var(--bg);
+  stroke-width: 0.5;
+  paint-order: stroke;
+  shape-rendering: crispEdges;
+}
+/* at the arrow's tail: the visitor's move, or time running fast */
+.pointer button,
+.skip {
+  position: absolute;
+  top: 42px;
+  left: 38px;
+  background: var(--danger);
+  color: var(--bg);
+}
+.pointer button {
+  pointer-events: auto;
+}
+.skip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  padding: 0 12px;
+}
+.skip svg {
+  fill: currentColor;
+  shape-rendering: crispEdges;
+}
+.skip-clock {
+  width: 22px;
+  height: 22px;
+}
+/* around the clock many times while the wait is skipped, the short hand a little way */
+.skip-minutes,
+.skip-hours {
+  transform-box: view-box;
+  transform-origin: 50% 50%;
+  animation: skip-turn var(--ms) linear forwards;
+}
+.skip-minutes {
+  --turn: 5turn;
+}
+.skip-hours {
+  --turn: 0.42turn;
+}
+.skip-sign {
+  width: 27px;
+  height: 21px;
+  animation: skip-blink 0.5s steps(1) infinite;
+}
+@keyframes skip-turn {
+  to {
+    transform: rotate(var(--turn));
+  }
+}
+@keyframes skip-blink {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* T3 Code's window, zoomed out until its sidebar and a whole turn fit next to the popover */
+.t3 {
+  --zoom: 0.85;
+  height: 562px;
+  overflow: hidden;
+}
+.t3 iframe {
+  display: block;
+  width: calc(100% / var(--zoom));
+  height: calc(100% / var(--zoom));
+  border: 0;
+  transform: scale(var(--zoom));
+  transform-origin: 0 0;
+}
+
+/* ── under the hood: T3 Code, t3boat, the machines ─ */
+
+.relay {
+  /* one beat for a waking machine's wire and row, so they pulse together */
+  --wake-pulse: 0.9s;
+  width: min(1160px, 100% - 48px);
+  margin-inline: auto;
+  padding-bottom: 128px;
+}
+
+/* the laptop and Boat, each a dashed region; wires drawn over both */
+.relay-map {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
+  gap: clamp(56px, 8vw, 112px);
+  margin-top: 48px;
+}
+.relay-laptop,
+.relay-cloud {
+  position: relative;
+  z-index: 1;
+  border: 1px dashed var(--frame);
+}
+.relay-laptop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 48px;
+  padding: 44px clamp(24px, 4vw, 48px) 36px;
+}
+.relay-cloud {
+  padding: 44px 24px 36px;
+}
+/* each region's name, sitting on its border */
+.relay-where {
+  position: absolute;
+  top: 0;
+  left: 16px;
+  translate: 0 -50%;
+  padding: 0 8px;
+  background: var(--bg);
+  font: 400 12px/1 var(--font-mono);
+  color: var(--muted);
+}
+.relay-where svg {
+  display: block;
+  width: auto;
+  height: 15px;
+  color: var(--fg);
+}
+
+.relay-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: 600 22px/1 var(--font-display);
+  letter-spacing: -0.02em;
+}
+.relay-name svg {
+  width: auto;
+  height: 15px;
+}
+
+/* T3 Code, and every machine as it sees them: online */
+.relay-t3 {
+  display: grid;
+  gap: 18px;
+}
+.relay-t3 ul,
+.relay-cloud ul {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.relay-t3 ul {
+  gap: 8px;
+  font: 400 12px/1 var(--font-mono);
+  color: var(--muted);
+}
+.relay-t3 li {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+}
+.relay-t3 li span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent-text);
+}
+.relay-t3 li span::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  background: currentColor;
+}
+
+/* t3boat, and what it is doing when that is more than passing things along */
+.relay-hub {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding-bottom: 34px;
+}
+.relay-hub img {
+  display: block;
+  width: 56px;
+  height: 56px;
+}
+/* the message t3boat holds for a sleeping machine, on its icon like a badge */
+.relay-held {
+  position: absolute;
+  top: -4px;
+  left: calc(50% + 28px - 8px);
+  width: 12px;
+  height: 12px;
+  background: var(--accent);
+  outline: 2px solid var(--bg);
+  visibility: hidden;
+}
+.relay-held[data-on] {
+  visibility: visible;
+  animation: relay-pop var(--ocean-ease) both;
+}
+.relay-doing {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  translate: -50% 0;
+  padding: 4px 7px 3px;
+  white-space: nowrap;
+  font: 400 12px/1 var(--font-mono);
+}
+.relay-doing[data-on] {
+  background: var(--accent);
+  color: var(--accent-fg);
+  animation: relay-in var(--ocean-ease) both;
+}
+
+/* the machines: boat, name, real state */
+.relay-cloud ul {
+  gap: 16px;
+}
+.relay-cloud li {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+/* a waking machine's row: a card that breathes with its wire */
+.relay-cloud li[data-state="waking"]::before {
+  content: "";
+  position: absolute;
+  inset: -8px -12px;
+  z-index: -1;
+  background: var(--accent);
+  animation: relay-wake-card var(--wake-pulse) ease-in-out infinite alternate;
+}
+.relay-cloud .boat-icon {
+  display: block;
+  width: 48px;
+  height: 42px;
+  image-rendering: pixelated;
+}
+.relay-vm-name {
+  font: 400 13px/1 var(--font-mono);
+}
+.relay-tag {
+  padding: 3px 6px 2px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font: 400 12px/1 var(--font-mono);
+}
+.relay-cloud li[data-state="asleep"] .relay-tag {
+  background: var(--tag-dim-bg);
+  color: var(--tag-dim-fg);
+  letter-spacing: 0.06em;
+}
+
+/* wires: solid while live, dashed to a sleeping machine, pulsing to a waking one; packets step along them */
+.relay-wires {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  shape-rendering: crispEdges;
+}
+.relay-wires polyline {
+  fill: none;
+  stroke: var(--frame);
+  stroke-width: 2;
+  stroke-dasharray: 4 4;
+}
+.relay-wires polyline[data-live] {
+  stroke: var(--accent);
+  stroke-dasharray: none;
+}
+.relay-wires polyline[data-waking] {
+  animation: relay-wake-wire var(--wake-pulse) ease-in-out infinite alternate;
+}
+.relay-packet {
+  fill: var(--accent);
+}
+.relay-packet.is-reply {
+  fill: var(--accent-text);
+}
+
+@keyframes relay-pop {
+  from {
+    scale: 0;
+  }
+}
+
+@keyframes relay-wake-wire {
+  from {
+    stroke-width: 4;
+  }
+  to {
+    opacity: 0.15;
+  }
+}
+@keyframes relay-wake-card {
+  from {
+    opacity: 0.2;
+  }
+  to {
+    opacity: 0.04;
+  }
+}
+
+@keyframes relay-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+/* stacked: laptop over Boat, wires running down */
+@media (max-width: 900px) {
+  .relay {
+    padding-bottom: 88px;
+  }
+  .relay-map {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .relay-laptop {
+    flex-direction: column;
+    gap: 56px;
+  }
+  /* room on the left for the wires' spine; Boat's name on the right, clear of it */
+  .relay-cloud {
+    padding-left: 40px;
+  }
+  .relay-cloud .relay-where {
+    left: auto;
+    right: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .relay-doing,
+  .relay-held,
+  .relay-wires polyline,
+  .relay-cloud li::before {
+    animation: none !important;
+  }
+}
+
+/* ── what you need ───────────────────────────────── */
+
+.needs {
+  width: min(1160px, 100% - 48px);
+  margin-inline: auto;
+  padding-bottom: 128px;
+}
+
+/* one framed cell each: the logo, then what of it you need */
+.needs-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 24px;
+  margin: 36px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.needs-list li {
+  display: grid;
+  align-content: space-between;
+  gap: 40px;
+  padding: 28px 24px 22px;
+  border: 1px solid var(--frame);
+  box-shadow: 8px 8px 0 var(--shadow);
+  font: 400 13px/1.4 var(--font-mono);
+  color: var(--muted);
+}
+
+/* every logo on the same 28px line */
+.needs-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  height: 28px;
+  color: var(--fg);
+  font: 600 30px/1 var(--font-display);
+  letter-spacing: -0.02em;
+}
+.needs-logo svg {
+  width: auto;
+}
+a.needs-logo:hover {
+  color: var(--accent-text);
+}
+/* the T3 mark at the word's cap height, Boat's wordmark at its own */
+.needs-t3 {
+  height: 21px;
+}
+.needs-boat {
+  height: 28px;
+}
+.needs-os {
+  gap: 18px;
+}
+.needs-os svg {
+  height: 26px;
+}
+
+/* on the page, not the sky: the ocean button in both themes */
+.needs .install {
+  --install-bg: var(--ocean);
+  --install-hover: var(--blue-500);
+  --install-fg: #fff;
+  --install-shadow: 4px 4px 0 var(--shadow);
+  margin-top: 40px;
+}
+
+@media (max-width: 900px) {
+  .needs {
+    padding-bottom: 88px;
+  }
+  .needs-list {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 20px;
+  }
+  .needs-list li {
+    gap: 24px;
+  }
+}
+
+/* ── footer ────────────────────────────────────────── */
+
+/* the mark again, the products it joins as their own logos, then the fine print */
+.footer {
+  width: min(1160px, 100% - 48px);
+  margin-inline: auto;
+  padding-block: 40px 32px;
+  border-top: 1px solid var(--line);
+}
+
+.footer-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+.footer .wordmark {
+  font-size: 22px;
+}
+.footer .wordmark img {
+  width: 32px;
+  height: 32px;
+}
+
+.footer-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  /* the links' ink, not their hover boxes, lines up with the edges */
+  margin-inline: -10px;
+  font: 600 16px/1 var(--font-display);
+  letter-spacing: -0.02em;
+}
+/* lit up like the sea's tags on hover */
+.footer-links a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 10px;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+.footer-links a:hover {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.footer-links svg {
+  width: auto;
+  height: 14px;
+}
+/* the T3 mark at the word's cap height; Boat's wordmark at the text's size, its baseline on the text's (centring alone sits it 1.7px low) */
+.footer-links .footer-t3 {
+  height: 11px;
+}
+.footer-links .footer-boat {
+  height: 16px;
+  translate: 0 -1.7px;
+}
+
+.footer-fine {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px 24px;
+  margin-top: 28px;
+  font: 400 12px/1.4 var(--font-mono);
+  color: var(--muted);
+}
+.footer-fine a {
+  color: var(--fg);
+  text-decoration: underline;
+  text-decoration-color: var(--frame);
+  text-underline-offset: 3px;
+}
+.footer-fine a:hover {
+  text-decoration-color: currentColor;
+}
+
+/* ── narrow ────────────────────────────────────────── */
+
+@media (max-width: 900px) {
+  .together {
+    padding-bottom: 88px;
+  }
+  .stage {
+    grid-template: "now" "t3" "app" / minmax(0, 1fr);
+  }
+  /* kept in view while the windows scroll under it; the button under the words */
+  .now {
+    position: sticky;
+    top: 12px;
+    z-index: 1; /* over the arrow */
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(44px, auto) 40px;
+  }
+  .now button {
+    justify-self: end;
+  }
+  /* stacked, the window has the page's width: full size */
+  .t3 {
+    --zoom: 1;
+    height: 520px;
+  }
+  .pane-app {
+    justify-self: center;
+    max-width: 100%;
+    margin-top: 48px;
+  }
+  /* no taller than its one machine needs, so it shares the screen with T3 Code's composer */
+  .pane-app iframe {
+    max-width: calc(100vw - 50px);
+    height: 340px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .now *,
+  .now *::before,
+  .skip * {
+    animation: none !important;
+  }
+}
