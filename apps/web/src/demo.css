@@ -1,0 +1,6 @@
+/* Framed in the site, a scroll that runs out in the popover goes on to the page. The app keeps
+   its lists' scrolls to themselves, which here would hold the page still, even over a list with
+   nothing to scroll. */
+* {
+  overscroll-behavior: auto !important;
+}

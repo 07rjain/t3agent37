@@ -38,11 +38,10 @@ interface Nudge {
 
 type Message = Job | Nudge;
 
-/** Each step of a job, in seconds from its start. */
+/** Each step of a job, in seconds from its start. The machine starts waking the moment it lands. */
 const LANDS = 1.2;
-const WAKES = 3;
-const PASSES = 7.5;
-const WORKS = 8.7;
+const PASSES = 5.7;
+const WORKS = 6.9;
 const IDLE = 3;
 const DOZE = 3;
 /** A nudge: to t3boat, then straight on to the machine. */
@@ -84,7 +83,7 @@ function firstMessages(): Message[] {
 
 function stateIn(j: Job, s: number): MachineState {
   const into = s - j.at;
-  if (into < WAKES || into >= endOf(j) - j.at) return "asleep";
+  if (into < LANDS || into >= endOf(j) - j.at) return "asleep";
   if (into < PASSES) return "waking";
   if (into < WORKS) return "idle";
   if (into < WORKS + j.work) return "working";
@@ -109,8 +108,7 @@ function sceneAt(messages: Message[], s: number): Scene {
     if (state !== "asleep") states[j.name] = state;
     const into = s - j.at;
     if (into >= LANDS && into < PASSES) held = true;
-    if (into >= LANDS && into < WAKES) doing = `message held for ${j.name}`;
-    else if (into >= WAKES && into < PASSES) doing = `waking ${j.name}`;
+    if (into >= LANDS && into < PASSES) doing = `waking ${j.name}`;
     else if (into >= PASSES && into < WORKS) doing = "passing it on";
   }
   return { states, doing, held };
@@ -230,12 +228,20 @@ export function Relay() {
       const whole = rel(hub.current!.parentElement!);
       const region = rel(cloud.current!);
       const across = region.left >= whole.right;
+      const rows = new Map(MACHINES.map((m) => [m, rel(boats.current.get(m)!)]));
+      // the line through t3boat runs level with the machine row nearest its middle, if one faces it
+      const middle = icon.top + icon.height / 2;
+      const facing = [...rows.values()]
+        .map((r) => r.top + r.height / 2)
+        .filter((y) => y >= icon.top && y <= icon.bottom)
+        .sort((a, b) => Math.abs(a - middle) - Math.abs(b - middle));
+      const port = across ? new DOMRect(icon.left, facing[0] ?? middle, icon.width, 0) : icon;
       setPaths({
-        t3: elbow(rel(t3.current!), icon, 12, true),
+        t3: elbow(rel(t3.current!), port, 12, true),
         ...Object.fromEntries(
           MACHINES.map((m) => {
-            const to = rel(boats.current.get(m)!);
-            return [m, across ? elbow(icon, to, 10) : spine(whole, to, region, 6)];
+            const to = rows.get(m)!;
+            return [m, across ? elbow(port, to, 10) : spine(whole, to, region, 6)];
           }),
         ),
       });

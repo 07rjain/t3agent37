@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build && vite build --ssr src/prerender.tsx --outDir dist-ssr && bun scripts/prerender.ts",
     "preview": "vite preview",
-    "og": "bun scripts/og.ts"
+    "og": "bun scripts/og.ts",
+    "launch": "bun scripts/launch.ts"
   },
   "dependencies": {
     "@openpanel/web": "^1.4.4",

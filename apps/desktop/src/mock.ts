@@ -2,6 +2,7 @@
 // URL params shape the starting state: ?setup=installBoat|signInBoat|installT3|starting
 // ?machines=0|many|<count>  ?busy=1  ?mcp=mixed (Claude Code added, Codex not installed)
 // ?projects=0|error (T3 Code has no projects with a remote / listing them fails)
+// ?ready=1 (a new machine comes up in T3 Code with its agents signed in and acme on it, as the website shows it)
 import type { Backend } from "./api";
 import { timeLapse } from "./pixel/clock";
 import type { CommandArgs, CommandName, LocalProject, MachineDetails, MachineProject, MachineView, Setup, UiState } from "./types";
@@ -44,7 +45,7 @@ const keptAwake = (endsAt: number) => ({
 });
 
 const seedMachines: MachineView[] = [
-  // first: the one the website shows alone (?machines=1), asleep until its T3 Code sends a turn
+  // first: asleep until its T3 Code sends a turn
   machine({ id: "sb_e4d1", name: "devbox", size: "default", state: "asleep", detail: "Asleep · free", paired: true, projects: [onMachine("acme", "github.com/you/acme")] }),
   machine({
     id: "sb_7f2a",
@@ -171,7 +172,17 @@ function create(): MockBackend {
       }
       const id = `sb_${Math.random().toString(16).slice(2, 6)}`;
       state.machines = state.machines.map((m) =>
-        m.name === name ? { ...m, id, state: "idle", ...idle(), signedOut: ["Claude", "Codex"] } : m,
+        m.name === name
+          ? {
+              ...m,
+              id,
+              state: "idle",
+              ...idle(),
+              ...(params.get("ready") === "1"
+                ? { paired: true, projects: projects?.length ? [] : [onMachine("acme", "github.com/you/acme")] }
+                : { signedOut: ["Claude", "Codex"] }),
+            }
+          : m,
       );
       state.costs.startsToday += 1;
       emit();
