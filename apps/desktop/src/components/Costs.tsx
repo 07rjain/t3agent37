@@ -1,23 +1,30 @@
-import type { UiState } from "../types";
+import type { Costs as CostsData } from "../types";
 import { money } from "../machine";
 
-export function Costs({ costs }: { costs: UiState["costs"] }) {
-  const ratio = costs.startsLimit > 0 ? costs.startsToday / costs.startsLimit : 0;
+/** Below this the wallet may run dry before the month's disk is paid. */
+const LOW_WALLET = 5;
+
+export function Costs({ costs }: { costs: CostsData }) {
+  const ram = costs.memoryLimitGb > 0 ? costs.awakeRamGb / costs.memoryLimitGb : 0;
   return (
     <footer className="costs" aria-label="Costs">
-      <div className="cost">
-        <span className="caption">today</span>
-        <span className="cost-value">{money(costs.today)}</span>
+      <div className={`cost${costs.walletBalance < LOW_WALLET ? " is-warn" : ""}`} title="Agent37 wallet balance">
+        <span className="caption">wallet</span>
+        <span className="cost-value">{money(costs.walletBalance)}</span>
+      </div>
+      <div className="cost" title="Every machine's disk per month: billed even while all of them sleep">
+        <span className="caption">disk/mo</span>
+        <span className="cost-value">{money(costs.idleMonthly)}</span>
       </div>
       <div className="cost">
         <span className="caption">this month</span>
         <span className="cost-value">{money(costs.month)}</span>
       </div>
-      <div className={`cost${ratio >= 0.8 ? " is-warn" : ""}`} title="Machine starts used today / daily limit">
-        <span className="caption">starts today</span>
+      <div className={`cost${ram >= 0.8 ? " is-warn" : ""}`} title="Memory of the machines awake now / your Agent37 limit">
+        <span className="caption">awake ram</span>
         <span className="cost-value">
-          {costs.startsToday}
-          <span className="cost-of">/{costs.startsLimit}</span>
+          {costs.awakeRamGb}
+          <span className="cost-of">/{costs.memoryLimitGb} GB</span>
         </span>
       </div>
     </footer>

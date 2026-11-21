@@ -1,22 +1,49 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import type { UiState } from "../types";
-import { cleanName, hourly, NAME_RE, suggestName } from "../machine";
+import type { InstanceType, Region, UiState } from "../types";
+import {
+  cleanName,
+  computeHourly,
+  diskMonthly,
+  hourly,
+  INSTANCE_TYPES,
+  monthly,
+  NAME_RE,
+  REGIONS,
+  shapeFits,
+  sizeOf,
+  suggestName,
+} from "../machine";
 import { Icon } from "./Icons";
 import { ProjectList, useLocalProjects } from "./ProjectPicker";
 import { SubHeader } from "./SubHeader";
 
+export interface NewMachineSpec {
+  name: string;
+  size: string;
+  instanceType: InstanceType;
+  region: Region;
+  diskGb: number;
+  projects: string[];
+}
+
 interface Props {
   state: UiState;
   onNameChange: (name: string) => void;
-  onCreate: (name: string, size: string, projects: string[]) => void;
+  onCreate: (spec: NewMachineSpec) => void;
   onBack: () => void;
 }
+
+const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
 
 export function NewMachine({ state, onNameChange, onCreate, onBack }: Props) {
   const taken = state.machines.map((m) => m.name);
   const [name, setName] = useState(() => suggestName(taken));
-  // Boat's own default: room for builds and tests without the large price.
-  const [size, setSize] = useState(() => (state.sizes.some((s) => s.id === "default") ? "default" : (state.sizes[0]?.id ?? "")));
+  const [instanceType, setInstanceType] = useState<InstanceType>("default");
+  // the entry shape: room for builds and tests without the bigger price
+  const [size, setSize] = useState(() => (state.sizes.some((s) => s.id === "medium") ? "medium" : (state.sizes[0]?.id ?? "")));
+  const [region, setRegion] = useState<Region>("us");
+  const shape = sizeOf(state.sizes, size);
+  const [diskGb, setDiskGb] = useState(() => shape?.defaultDisk ?? 0);
   const input = useRef<HTMLInputElement>(null);
   const projects = useLocalProjects();
   const [picked, setPicked] = useState<string[]>([]);
@@ -26,6 +53,22 @@ export function NewMachine({ state, onNameChange, onCreate, onBack }: Props) {
     input.current?.select();
   }, []);
   useEffect(() => onNameChange(name), [name, onNameChange]);
+
+  const pickSize = (id: string) => {
+    const s = sizeOf(state.sizes, id);
+    setSize(id);
+    if (s) setDiskGb(s.defaultDisk);
+  };
+  const pickType = (t: InstanceType) => {
+    setInstanceType(t);
+    // `max` needs a VM: fall back to the biggest shape a container can be
+    if (shape && !shapeFits(shape, t)) {
+      const fallback = [...state.sizes].reverse().find((s) => shapeFits(s, t));
+      if (fallback) pickSize(fallback.id);
+    }
+  };
+
+  const disk = shape ? clamp(diskGb, shape.minDisk, shape.maxDisk) : diskGb;
 
   const problem = !name
     ? "Give it a name"
@@ -37,7 +80,7 @@ export function NewMachine({ state, onNameChange, onCreate, onBack }: Props) {
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (!problem && size) onCreate(name, size, picked);
+    if (!problem && shape) onCreate({ name, size, instanceType, region, diskGb: disk, projects: picked });
   };
 
   return (
@@ -69,21 +112,94 @@ export function NewMachine({ state, onNameChange, onCreate, onBack }: Props) {
         </div>
 
         <fieldset className="field">
-          <legend className="caption">size</legend>
+          <legend className="caption">type</legend>
           <div className="sizes" role="radiogroup">
-            {state.sizes.map((s) => (
-              <label key={s.id} className={`size${size === s.id ? " is-on" : ""}`}>
-                <input type="radio" name="size" value={s.id} checked={size === s.id} onChange={() => setSize(s.id)} />
-                <span className="size-name">{s.id}</span>
-                <span className="size-spec">{s.spec}</span>
-                <span className="size-price">{hourly(s.hourly)}</span>
+            {INSTANCE_TYPES.map((t) => (
+              <label key={t.id} className={`size${instanceType === t.id ? " is-on" : ""}`}>
+                <input
+                  type="radio"
+                  name="instance-type"
+                  value={t.id}
+                  checked={instanceType === t.id}
+                  onChange={() => pickType(t.id)}
+                />
+                <span className="size-name">{t.label}</span>
+                <span className="size-spec">{t.spec}</span>
+                <span className="size-price">{t.multiplier}× compute</span>
               </label>
             ))}
           </div>
-          <span className="hint">
-            Billed only while awake · sleeps 3 min after agents finish · resize anytime
-          </span>
         </fieldset>
+
+        <fieldset className="field">
+          <legend className="caption">size</legend>
+          <div className="sizes" role="radiogroup">
+            {state.sizes.map((s) => {
+              const fits = shapeFits(s, instanceType);
+              return (
+                <label
+                  key={s.id}
+                  className={`size${size === s.id ? " is-on" : ""}${fits ? "" : " is-off"}`}
+                  title={fits ? undefined : "Needs a vm or performance machine"}
+                >
+                  <input
+                    type="radio"
+                    name="size"
+                    value={s.id}
+                    checked={size === s.id}
+                    disabled={!fits}
+                    onChange={() => pickSize(s.id)}
+                  />
+                  <span className="size-name">{s.id}</span>
+                  <span className="size-spec">{s.spec}</span>
+                  <span className="size-price">{fits ? hourly(computeHourly(s, instanceType)) : "vm only"}</span>
+                </label>
+              );
+            })}
+          </div>
+          <span className="hint">Compute bills only while awake · sleeps 3 min after agents finish · resize anytime</span>
+        </fieldset>
+
+        <fieldset className="field">
+          <legend className="caption">region</legend>
+          <div className="segmented" role="radiogroup" aria-label="Region">
+            {REGIONS.map((r) => (
+              <button
+                key={r.id}
+                type="button"
+                role="radio"
+                aria-checked={region === r.id}
+                className={region === r.id ? "is-on" : undefined}
+                onClick={() => setRegion(r.id)}
+              >
+                {r.label}
+              </button>
+            ))}
+          </div>
+        </fieldset>
+
+        {shape ? (
+          <fieldset className="field">
+            <legend className="caption">disk</legend>
+            <div className="disk-pick">
+              <input
+                type="range"
+                className="range"
+                aria-label="Disk size in GB"
+                min={shape.minDisk}
+                max={shape.maxDisk}
+                step={1}
+                value={disk}
+                disabled={shape.minDisk === shape.maxDisk}
+                onChange={(e) => setDiskGb(Number(e.target.value))}
+              />
+              <span className="disk-pick-value">{disk} GB</span>
+            </div>
+            <span className="hint">
+              {disk} GB · {monthly(diskMonthly(disk))} even while asleep · disk can grow, never shrink
+            </span>
+          </fieldset>
+        ) : null}
 
         <fieldset className="field">
           <legend className="caption">projects</legend>
@@ -125,7 +241,7 @@ export function NewMachine({ state, onNameChange, onCreate, onBack }: Props) {
         </fieldset>
       </div>
       <div className="view-foot">
-        <button type="submit" className="btn btn-solid btn-lg" disabled={!!problem || !size}>
+        <button type="submit" className="btn btn-solid btn-lg" disabled={!!problem || !shape}>
           Launch machine
         </button>
         <p className="foot-note">

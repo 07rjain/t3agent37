@@ -1,11 +1,14 @@
-//! WebSocket connections to the T3 server on the machine, authenticated with the proxy's token.
+//! WebSocket connections to the T3 server on the machine, authenticated with the proxy's token
+//! and optional edge headers (such as Agent37's `X-Agent37-Key`, which the edge strips before
+//! forwarding `Authorization: Bearer` to `t3 serve`).
 
 use anyhow::{bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
+use reqwest::header::HeaderMap;
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
@@ -16,18 +19,34 @@ pub type Upstream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 pub const PING: Duration = Duration::from_secs(10);
 pub const SILENCE: Duration = Duration::from_secs(30);
 
-/// Opens `target` (path and query) on the T3 server as a WebSocket.
-pub async fn connect(base_url: &str, token: &str, target: &str) -> Result<Upstream> {
+/// Opens `target` (path and query) on the T3 server as a WebSocket, injecting `extra_headers`
+/// (e.g. `X-Agent37-Key`) alongside `Authorization: Bearer <token>`.
+pub async fn connect_with_headers(
+    base_url: &str,
+    token: &str,
+    target: &str,
+    extra_headers: &HeaderMap,
+) -> Result<Upstream> {
     let ws_base = base_url
         .replacen("https://", "wss://", 1)
         .replacen("http://", "ws://", 1);
     let mut req = format!("{ws_base}{target}").into_client_request()?;
     req.headers_mut()
         .insert("authorization", HeaderValue::from_str(&format!("Bearer {token}"))?);
+    for (k, v) in extra_headers {
+        let name = HeaderName::from_bytes(k.as_str().as_bytes())?;
+        let val = HeaderValue::from_bytes(v.as_bytes())?;
+        req.headers_mut().insert(name, val);
+    }
     let (ws, _) = tokio::time::timeout(Duration::from_secs(15), tokio_tungstenite::connect_async(req))
         .await
         .context("upstream connect timed out")??;
     Ok(ws)
+}
+
+/// Opens `target` without extra edge headers (used when talking to the local desktop T3 server).
+pub async fn connect(base_url: &str, token: &str, target: &str) -> Result<Upstream> {
+    connect_with_headers(base_url, token, target, &HeaderMap::new()).await
 }
 
 /// The RPC socket. `client_query` carries the desktop's client* parameters through, minus its
@@ -40,12 +59,13 @@ pub fn rpc_target(client_query: &str) -> String {
 
 /// Sends a few unary requests on a short-lived connection and waits for their results, in
 /// request order: the success value or the server's failure message.
-pub async fn call_many(
+pub async fn call_many_with_headers(
     base_url: &str,
     token: &str,
+    extra_headers: &HeaderMap,
     requests: Vec<(String, Value)>,
 ) -> Result<Vec<std::result::Result<Value, String>>> {
-    let mut ws = connect(base_url, token, &rpc_target("")).await?;
+    let mut ws = connect_with_headers(base_url, token, &rpc_target(""), extra_headers).await?;
     let mut results = vec![Ok(Value::Null); requests.len()];
     let mut pending = std::collections::HashMap::new();
     for (i, (tag, payload)) in requests.into_iter().enumerate() {
@@ -77,25 +97,44 @@ pub async fn call_many(
     Ok(results)
 }
 
+pub async fn call_many(
+    base_url: &str,
+    token: &str,
+    requests: Vec<(String, Value)>,
+) -> Result<Vec<std::result::Result<Value, String>>> {
+    call_many_with_headers(base_url, token, &HeaderMap::new(), requests).await
+}
+
 /// One request, as a T3 client makes it: its value, or the server's own failure message.
-pub async fn call(base_url: &str, token: &str, tag: &str, payload: Value) -> Result<Value> {
-    subscribe_until(base_url, token, tag, payload, Duration::from_secs(60), |_| None::<()>)
+pub async fn call_with_headers(
+    base_url: &str,
+    token: &str,
+    extra_headers: &HeaderMap,
+    tag: &str,
+    payload: Value,
+) -> Result<Value> {
+    subscribe_until_with_headers(base_url, token, extra_headers, tag, payload, Duration::from_secs(60), |_| None::<()>)
         .await
         .map(|(_, value)| value)
+}
+
+pub async fn call(base_url: &str, token: &str, tag: &str, payload: Value) -> Result<Value> {
+    call_with_headers(base_url, token, &HeaderMap::new(), tag, payload).await
 }
 
 /// Opens `tag` and hands every streamed item to `on_item` until it returns a result, or the
 /// request ends: `(Some(result), Null)` or `(None, exit value)`. Acks each chunk, as T3's
 /// clients do, so the server keeps sending.
-pub async fn subscribe_until<T>(
+pub async fn subscribe_until_with_headers<T>(
     base_url: &str,
     token: &str,
+    extra_headers: &HeaderMap,
     tag: &str,
     payload: Value,
     timeout: Duration,
     mut on_item: impl FnMut(&Value) -> Option<T>,
 ) -> Result<(Option<T>, Value)> {
-    let mut ws = connect(base_url, token, &rpc_target("")).await?;
+    let mut ws = connect_with_headers(base_url, token, &rpc_target(""), extra_headers).await?;
     let msg = json!({"_tag": "Request", "id": "1", "tag": tag, "payload": payload, "headers": []});
     ws.send(Message::text(msg.to_string())).await?;
     let deadline = tokio::time::Instant::now() + timeout;
@@ -131,6 +170,17 @@ pub async fn subscribe_until<T>(
     };
     let _ = ws.close(None).await;
     Ok(outcome)
+}
+
+pub async fn subscribe_until<T>(
+    base_url: &str,
+    token: &str,
+    tag: &str,
+    payload: Value,
+    timeout: Duration,
+    on_item: impl FnMut(&Value) -> Option<T>,
+) -> Result<(Option<T>, Value)> {
+    subscribe_until_with_headers(base_url, token, &HeaderMap::new(), tag, payload, timeout, on_item).await
 }
 
 /// What a failed request's cause says: the typed error's message, else its tag or the defect.

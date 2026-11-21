@@ -1,11 +1,17 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useMachineDetails, useLatestThread } from "../api";
-import type { MachineDetails as Details, LocalProject, MachineView, Size } from "../types";
+import type { MachineDetails as Details, DiskUsage, LocalProject, MachineView, Size } from "../types";
 import {
   ACTIONS,
   autoSleep,
+  computeHourly,
   duration,
+  gigabytes,
+  growDisk,
   hourly,
+  instanceLabel,
+  monthly,
+  shapeFits,
   STAY_AWAKE,
   keepAwake,
   machineKey,
@@ -32,6 +38,8 @@ import { SubHeader } from "./SubHeader";
 interface Props {
   machine: MachineView;
   sizes: Size[];
+  /** while a GitHub device sign-in waits: the code its page asks for */
+  signInCode: string | null;
   /** latest UiState; every new one triggers a details refetch */
   version: unknown;
   pending: string | null;
@@ -48,6 +56,7 @@ interface Props {
 export function MachineDetails({
   machine: m,
   sizes,
+  signInCode,
   version,
   pending,
   deleteError,
@@ -74,7 +83,9 @@ export function MachineDetails({
       <div className="view-body details-body">
         <Glance m={m} size={sizeOf(sizes, m.size)} d={d} />
         {gone ? null : <Power m={m} busy={busy} onAction={onAction} />}
+        {gone ? null : <Disk m={m} usage={d?.diskUsage ?? m.diskUsage} sizes={sizes} busy={busy} onAction={onAction} />}
         <Agents m={m} d={d} pending={pending} onAction={onAction} />
+        <GitHub m={m} signedIn={m.githubSignedIn || !!d?.githubSignedIn} signInCode={signInCode} pending={pending} onAction={onAction} />
         <Connect m={m} d={d} pending={pending} onAction={onAction} />
         <Projects m={m} pickProject={pickProject} onAddProject={onAddProject} />
         <MachineMore
@@ -143,12 +154,13 @@ function Glance({ m, size, d }: { m: MachineView; size: Size | undefined; d: Det
           {rest.length ? <span className="glance-detail">{rest.join(" · ")}</span> : null}
           <span className="glance-spec">
             <span className="chip">{m.size}</span>
-            {size ? (
-              <>
-                <span>{size.spec}</span>
-                <span className="glance-rate">{hourly(size.hourly)}</span>
-              </>
-            ) : null}
+            <span className="chip">{instanceLabel(m.instanceType)}</span>
+            <span className="chip">{m.region}</span>
+            {size ? <span>{size.spec}</span> : null}
+            <span className="glance-rate">{hourly(m.hourlyRate)} awake</span>
+          </span>
+          <span className="glance-spec glance-disk">
+            {m.diskGb} GB disk · {monthly(m.idleMonthly)} asleep
           </span>
         </div>
       </div>
@@ -201,7 +213,9 @@ function Power({ m, busy, onAction }: { m: MachineView; busy: boolean; onAction:
         <span className="toggle-text">
           <span className="toggle-name">Auto sleep</span>
           <span className="hint">
-            {on ? "Sleeps 3 min after agents finish; asleep is free" : "Stays up and bills until you turn this back on"}
+            {on
+              ? `Sleeps 3 min after agents finish; asleep bills disk only (${monthly(m.idleMonthly)})`
+              : `Stays up and bills ${hourly(m.hourlyRate)} until you turn this back on`}
           </span>
         </span>
         <input
@@ -272,6 +286,127 @@ function StayAwake({ m, busy, onAction }: { m: MachineView; busy: boolean; onAct
         </div>
       ) : null}
     </div>
+  );
+}
+
+/** How full the disk is, and the one-click fix when it nearly is. */
+function Disk({
+  m,
+  usage,
+  sizes,
+  busy,
+  onAction,
+}: {
+  m: MachineView;
+  usage: DiskUsage | null;
+  sizes: Size[];
+  busy: boolean;
+  onAction: (a: Action) => void;
+}) {
+  const grow = growDisk(m, sizes);
+  const pct = usage ? Math.round(usage.usedPercent) : null;
+  return (
+    <Section title="disk" extra={<span className="caption">{m.diskGb} GB</span>}>
+      {usage && pct !== null ? (
+        <div className={`disk${m.diskWarning ? " is-warn" : ""}`}>
+          <div
+            className="disk-bar"
+            role="meter"
+            aria-label="Disk used"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={pct}
+          >
+            <i style={{ width: `${Math.min(100, Math.max(0, usage.usedPercent))}%` }} />
+          </div>
+          <span className="disk-text">
+            {gigabytes(usage.usedBytes)} of {gigabytes(usage.totalBytes)} used · {pct}%
+          </span>
+        </div>
+      ) : (
+        <span className="hint">Usage shows once it has been awake</span>
+      )}
+      {m.diskWarning ? (
+        <div className="disk-warn" role="status">
+          <span className="hint is-error">
+            {grow ? "Nearly full: builds and clones may fail" : "Nearly full, and at its size's limit: resize to a bigger size to grow it"}
+          </span>
+          {grow ? (
+            <button className="btn btn-sm btn-outline" disabled={busy} onClick={() => onAction(grow)}>
+              {grow.label}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      <span className="hint">
+        {monthly(m.idleMonthly)} even while asleep · grows, never shrinks
+        {grow && !m.diskWarning ? (
+          <>
+            {" · "}
+            <button className="btn btn-link disk-grow-link" disabled={busy} onClick={() => onAction(grow)}>
+              {grow.label}
+            </button>
+          </>
+        ) : null}
+      </span>
+    </Section>
+  );
+}
+
+/** GitHub on the machine: private repos clone and agents can push. */
+function GitHub({
+  m,
+  signedIn,
+  signInCode,
+  pending,
+  onAction,
+}: {
+  m: MachineView;
+  signedIn: boolean;
+  signInCode: string | null;
+  pending: string | null;
+  onAction: (a: Action) => void;
+}) {
+  const running = pending === ACTIONS.github.busy;
+  return (
+    <Section title="github">
+      <ul className="lines">
+        <li className="line">
+          <span className="line-main">GitHub</span>
+          {signedIn ? (
+            <span className="line-ok">
+              <Icon name="check" size={10} /> signed in
+            </span>
+          ) : (
+            <button
+              className="btn btn-sm btn-outline"
+              disabled={!!pending || m.state === "missing"}
+              aria-busy={running}
+              onClick={() => onAction(ACTIONS.github)}
+            >
+              {running ? (
+                <>
+                  <Dots /> {ACTIONS.github.busy}
+                </>
+              ) : (
+                ACTIONS.github.label
+              )}
+            </button>
+          )}
+        </li>
+        {running && signInCode ? (
+          <li className="line">
+            <span className="line-main line-dim">
+              Enter <code className="step-code">{signInCode}</code> on GitHub's page
+            </span>
+          </li>
+        ) : signedIn ? null : (
+          <li className="line">
+            <span className="line-main line-dim">So private repos clone and agents can push</span>
+          </li>
+        )}
+      </ul>
+    </Section>
   );
 }
 
@@ -450,7 +585,6 @@ function MachineMore({
 }) {
   const ref = useRef<HTMLDetailsElement>(null);
   const [deleteArmed, armDelete] = useArmed();
-  const size = sizeOf(sizes, m.size);
   const gone = m.state === "missing";
 
   // a refused delete (from here or the list) must be visible
@@ -463,9 +597,7 @@ function MachineMore({
       <summary className="section-head">
         <span className="caption">machine</span>
         <span className="section-rule" />
-        <span className="caption more-peek">
-          {gone ? "gone" : size ? `${m.size} · ${hourly(size.hourly)}` : m.size}
-        </span>
+        <span className="caption more-peek">{gone ? "gone" : `${m.size} · ${hourly(m.hourlyRate)}`}</span>
         <Icon name="chevron" size={8} />
       </summary>
       <div className="more-body">
@@ -473,20 +605,24 @@ function MachineMore({
           <div className="more-group">
             <span className="toggle-name">Size</span>
             <div className="segmented" role="radiogroup" aria-label="Size">
-              {sizes.map((s) => (
-                <button
-                  key={s.id}
-                  role="radio"
-                  aria-checked={s.id === m.size}
-                  className={s.id === m.size ? "is-on" : undefined}
-                  disabled={busy}
-                  onClick={() => s.id !== m.size && onAction(resizeTo(s.id))}
-                >
-                  {s.id}
-                  <small>{s.spec}</small>
-                  <small>{hourly(s.hourly)}</small>
-                </button>
-              ))}
+              {sizes.map((s) => {
+                const fits = shapeFits(s, m.instanceType, m.diskGb);
+                return (
+                  <button
+                    key={s.id}
+                    role="radio"
+                    aria-checked={s.id === m.size}
+                    className={s.id === m.size ? "is-on" : undefined}
+                    disabled={busy || !fits}
+                    title={fits ? undefined : s.vmOnly && m.instanceType === "default" ? "Needs a vm or performance machine" : `Its disk tops out at ${s.maxDisk} GB`}
+                    onClick={() => s.id !== m.size && onAction(resizeTo(s.id))}
+                  >
+                    {s.id}
+                    <small>{s.spec}</small>
+                    <small>{hourly(computeHourly(s, m.instanceType))}</small>
+                  </button>
+                );
+              })}
             </div>
             <span className="hint">{resizeHint(m)}</span>
           </div>

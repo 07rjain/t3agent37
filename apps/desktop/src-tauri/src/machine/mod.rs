@@ -1,16 +1,17 @@
-//! One remote machine at runtime: its power state on Boat, its watchdog, waking it on demand and
-//! capturing its final state when it goes to sleep.
+//! One remote Agent37 machine at runtime: its power state on Agent37, its read-only watchdog,
+//! waking it on demand (`POST /start` with `409 try_again` backoff), capturing its final state,
+//! and proxy-driven sleeping (`POST /sleep`).
 
 mod capture;
 mod connect;
-mod disk;
+pub mod github;
 mod link;
 pub mod projects;
 pub mod provision;
 pub mod signin;
 mod work;
 
-use crate::boat::{Boat, Resume, Sandbox};
+use crate::agent37::{self, Agent37, Instance};
 use crate::proxy::auth::Auth;
 use crate::proxy::cache::{self, Cache};
 use crate::proxy::classify;
@@ -19,6 +20,7 @@ use crate::proxy::upstream;
 use crate::store::{Machine, Settings};
 use crate::t3desktop::T3Desktop;
 use anyhow::{anyhow, bail, Context, Result};
+use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -28,25 +30,26 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{mpsc, watch};
 
 const WATCHDOG_POLL: Duration = Duration::from_secs(5);
-const BOAT_POLL: Duration = Duration::from_secs(60);
+const API_POLL: Duration = Duration::from_secs(60);
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(20);
 const READY_TIMEOUT: Duration = Duration::from_secs(180);
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(120);
-/// A requested sleep: the 45 s grace for the ack, a save called off earlier still running (up
-/// to 10 min), the watchdog's own save when nobody acked (up to 10 min), and the stop settling
-/// (90 s).
-const SLEEP_TIMEOUT: Duration = Duration::from_secs(23 * 60);
-/// After a failed wake, requests fail fast instead of each retrying `boat resume`.
+/// After a failed wake, requests fail fast instead of each retrying `POST /start`.
 const WAKE_COOLDOWN: Duration = Duration::from_secs(30);
+/// After a failed sleep, back off before retrying `POST /sleep` so outages don't hammer the API.
+const SLEEP_COOLDOWN: Duration = Duration::from_secs(30);
 /// The watchdog's limit too.
 pub const MAX_KEEP_AWAKE_MINUTES: u32 = 24 * 60;
-const KEEP_ALIVE_RETRY: Duration = Duration::from_secs(3600);
-/// A machine woken for work due is up this much ahead of it: a wake from a snapshot is slow.
+/// A machine woken for work due is up this much ahead of it.
 const DUE_LEAD: chrono::TimeDelta = chrono::TimeDelta::minutes(2);
 const DUE_WAKE_RETRY: Duration = Duration::from_secs(5 * 60);
 /// A running machine's link is checked this often: links can be turned on, fail or near expiry
 /// while it stays up.
 const LINK_CHECK: Duration = Duration::from_secs(10 * 60);
+/// If a woken instance doesn't answer on `:3773` within this window, kick `supervisor.mjs`
+/// (handles cold-storage fresh boots on stock `agent37-base` containers).
+const SUPERVISOR_KICK_AFTER: Duration = Duration::from_secs(8);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Power {
@@ -55,18 +58,22 @@ pub enum Power {
     Running,
     Stopping,
     Stopped,
-    /// The sandbox is gone on Boat, or the machine was deleted here. Final.
+    /// The instance is gone on Agent37, or the machine was deleted here. Final.
     Missing,
 }
 
 impl Power {
-    fn from_sandbox(sb: &Sandbox) -> Self {
-        match sb.state.as_str() {
-            "ready" | "idle" | "running" => Power::Running,
-            "stopped" => Power::Stopped,
-            "stopping" => Power::Stopping,
-            "provisioned" | "cloning" | "resuming" | "starting" => Power::Starting,
-            _ => Power::Unknown,
+    fn from_instance(inst: &Instance) -> Self {
+        if inst.is_running() {
+            Power::Running
+        } else if inst.is_asleep_or_stopped() {
+            Power::Stopped
+        } else if inst.is_stopping() {
+            Power::Stopping
+        } else if inst.is_starting() {
+            Power::Starting
+        } else {
+            Power::Unknown
         }
     }
 }
@@ -78,15 +85,23 @@ pub struct Manifest {
     pub threads: HashMap<String, u64>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskUsage {
+    pub used_bytes: u64,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub used_percent: f64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "camelCase")]
 pub enum WatchdogPhase {
     Active,
-    /// The watchdog saves the snapshot itself, awake, after a drain nobody acked; always with a
-    /// manifest. Any use calls it off.
-    Saving,
     Draining,
-    Stopping,
+    /// Capture acked; the local proxy/daemon calls `POST /v1/instances/{id}/sleep`.
+    #[serde(alias = "ready_to_sleep", alias = "stopping")]
+    ReadyToSleep,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -98,7 +113,7 @@ pub struct WatchdogStatus {
     pub working_threads: u32,
     pub working_subagents: u32,
     /// Agent runs waiting on the user (an approval, a question): not busy, but a T3 restart
-    /// would expire what they wait on. Older watchdogs don't say.
+    /// would expire what they wait on.
     #[serde(default)]
     pub waiting_threads: u32,
     /// Busy only because of CPU use (a build or job outside an agent turn).
@@ -111,12 +126,16 @@ pub struct WatchdogStatus {
     pub keep_awake_forever: bool,
     pub idle_secs: u64,
     pub sleep_after_secs: u64,
-    /// When T3 next starts work on its own, ms since epoch. Older watchdogs don't say.
+    /// When T3 next starts work on its own, ms since epoch.
     #[serde(default)]
     pub next_due_at: Option<i64>,
     /// That is soon: the machine waits for it instead of sleeping.
     #[serde(default)]
     pub work_due: bool,
+    #[serde(default)]
+    pub ready_to_sleep: bool,
+    #[serde(default)]
+    pub disk: Option<DiskUsage>,
     pub manifest: Option<Manifest>,
     /// When this app got the status: what its second counts are relative to.
     #[serde(skip, default = "SystemTime::now")]
@@ -130,17 +149,17 @@ pub enum Event {
     /// A machine record changed and must be saved.
     Persist,
     Notify { title: String, body: String },
+    /// One-time device sign-in code (e.g. GitHub `gh auth login --web`), shown inline in UI.
+    SignInCode(Option<String>),
 }
 
-/// What every machine shares: the user's CLIs, settings and the app's event channel.
+/// What every machine shares: the Agent37 API client, local T3 desktop CLI, settings, and events.
 pub struct Shared {
-    pub boat: Boat,
+    pub agent37: Agent37,
     pub t3: T3Desktop,
     pub settings: RwLock<Settings>,
     pub events: mpsc::UnboundedSender<Event>,
     pub http: reqwest::Client,
-    /// Sandboxes whose snapshot is being saved: a delete leaves each to its save.
-    pub saving: Mutex<HashSet<String>>,
 }
 
 impl Shared {
@@ -154,6 +173,9 @@ impl Shared {
     pub fn notify(&self, title: impl Into<String>, body: impl Into<String>) {
         let _ = self.events.send(Event::Notify { title: title.into(), body: body.into() });
     }
+    pub fn set_sign_in_code(&self, code: Option<String>) {
+        let _ = self.events.send(Event::SignInCode(code));
+    }
 }
 
 pub struct MachineRuntime {
@@ -165,19 +187,19 @@ pub struct MachineRuntime {
     power: watch::Sender<Power>,
     stopped_at: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
     watchdog: Mutex<Option<WatchdogStatus>>,
-    /// One wake at a time; a delete takes it too, so no restore swaps the sandbox under it.
+    last_disk: Mutex<Option<DiskUsage>>,
+    /// One wake/resize/delete transition at a time.
     pub(crate) waking: tokio::sync::Mutex<()>,
-    /// One capture at a time: "sleep now" and the background poll can see the same drain.
+    /// One capture + proxy-driven sleep transition at a time.
     capturing: tokio::sync::Mutex<()>,
     last_heartbeat: Mutex<Option<Instant>>,
-    /// When the watchdog was seen stopping the machine; cleared once Boat reports it stopped or
-    /// the watchdog is active again.
+    /// When proxy-driven sleep was initiated; cleared once Agent37 reports asleep/stopped or active.
     stop_seen: Mutex<Option<Instant>>,
     /// The last failed wake: its message and when.
     wake_failure: Mutex<Option<(String, Instant)>>,
-    /// Saving the snapshot failing, until a save succeeds.
-    save_failure: Mutex<Option<disk::SaveFailure>>,
-    /// Its T3 projects as last read, and those t3boat is adding.
+    /// When the last `agent37.sleep()` failed, used to back off retries on API outages.
+    sleep_failure: Mutex<Option<Instant>>,
+    /// Its T3 projects as last read, and those t3agent37 is adding.
     projects: Mutex<Vec<projects::MachineProject>>,
     adding: Mutex<Vec<projects::MachineProject>>,
 }
@@ -195,12 +217,13 @@ impl MachineRuntime {
             power: watch::channel(Power::Unknown).0,
             stopped_at: Mutex::new(None),
             watchdog: Mutex::new(None),
+            last_disk: Mutex::new(None),
             waking: tokio::sync::Mutex::new(()),
             capturing: tokio::sync::Mutex::new(()),
             last_heartbeat: Mutex::new(None),
             stop_seen: Mutex::new(None),
             wake_failure: Mutex::new(None),
-            save_failure: Mutex::new(None),
+            sleep_failure: Mutex::new(None),
             projects: Mutex::new(Vec::new()),
             adding: Mutex::new(Vec::new()),
         };
@@ -224,7 +247,7 @@ impl MachineRuntime {
         self.record.read().unwrap().id.clone()
     }
 
-    /// The Boat sandbox the machine runs on now.
+    /// The Agent37 instance id.
     pub fn sandbox_id(&self) -> String {
         self.record.read().unwrap().sandbox_id.clone()
     }
@@ -232,6 +255,11 @@ impl MachineRuntime {
     /// Where this machine's cache, chats and assets are kept on this computer.
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Agent37 edge authentication header (`X-Agent37-Key`) injected on every upstream request.
+    pub fn edge_headers(&self) -> HeaderMap {
+        self.shared.agent37.edge_headers().unwrap_or_default()
     }
 
     pub fn power(&self) -> Power {
@@ -242,15 +270,16 @@ impl MachineRuntime {
         self.power.subscribe()
     }
 
-    /// Deleted by this app: nothing may wake it or write to its dir again. Taken under the cache
-    /// lock, so no `save_cache` that missed it is still writing.
+    pub fn disk_usage(&self) -> Option<DiskUsage> {
+        self.last_disk.lock().unwrap().clone()
+    }
+
+    /// Deleted by this app: nothing may wake it or write to its dir again.
     pub fn retire(&self) {
         let _cache = self.cache.lock().unwrap();
         self.set_power(Power::Missing);
     }
 
-    /// Missing is final: a Boat answer or a wake still in flight from before must not revive a
-    /// deleted machine.
     fn set_power(&self, p: Power) {
         let changed = self.power.send_if_modified(|cur| {
             if *cur == Power::Missing || *cur == p {
@@ -271,14 +300,12 @@ impl MachineRuntime {
         self.watchdog.lock().unwrap().clone()
     }
 
-    /// Long enough for any stop to finish; a stop still pending after this failed.
     const STOP_SETTLE: Duration = Duration::from_secs(120);
 
     pub fn last_error(&self) -> Option<String> {
         self.wake_failure.lock().unwrap().as_ref().map(|(e, _)| e.clone())
     }
 
-    /// The machine is about to freeze or frozen: user actions must wait for it and wake it again.
     pub fn is_stopping(&self) -> bool {
         matches!(self.power(), Power::Stopping | Power::Stopped) || self.stop_pending()
     }
@@ -288,7 +315,6 @@ impl MachineRuntime {
     }
 
     pub fn save_cache(&self) {
-        // Serialized and written under the lock: one writer at a time for the file.
         let result = {
             let cache = self.cache.lock().unwrap();
             if self.power() == Power::Missing {
@@ -303,32 +329,26 @@ impl MachineRuntime {
 
     pub async fn refresh_power(&self) -> Result<Power> {
         let id = self.sandbox_id();
-        match self.shared.boat.info(&id).await {
-            Ok(sb) => {
-                // A restore swapped the sandbox meanwhile: this answer is about the old one.
-                if self.sandbox_id() != id {
-                    return Ok(self.power());
+        match self.shared.agent37.get(&id).await {
+            Ok(inst) => {
+                if let Some(slept_at) = inst.slept_at {
+                    *self.stopped_at.lock().unwrap() = Some(slept_at);
+                } else if inst.is_asleep_or_stopped() && self.stopped_at.lock().unwrap().is_none() {
+                    *self.stopped_at.lock().unwrap() = Some(chrono::Utc::now());
                 }
-                *self.stopped_at.lock().unwrap() = sb.stopped_at;
-                let mut p = Power::from_sandbox(&sb);
+                let mut p = Power::from_instance(&inst);
                 if p == Power::Stopped {
                     *self.stop_seen.lock().unwrap() = None;
                 } else if p == Power::Running && self.stop_pending() {
-                    // Boat lags behind the watchdog by a few seconds.
                     p = Power::Stopping;
                 } else if p == Power::Running && self.waking.try_lock().is_err() {
-                    // A wake is waiting for T3 to answer; it publishes Running once it does.
                     return Ok(p);
                 }
                 self.set_power(p);
                 Ok(p)
             }
             Err(e) => {
-                let gone = self.shared.boat.confirmed_gone(&id).await;
-                if self.sandbox_id() != id {
-                    // Restored meanwhile, and the old sandbox deleted.
-                    return Ok(self.power());
-                }
+                let gone = self.shared.agent37.confirmed_gone(&id).await;
                 if gone {
                     self.set_power(Power::Missing);
                     return Ok(Power::Missing);
@@ -338,8 +358,6 @@ impl MachineRuntime {
         }
     }
 
-    /// Waits out transitional states, so callers see Running or Stopped (or Missing). A wake
-    /// publishes its own outcome; the run loop resolves the rest.
     pub async fn settled_power(&self) -> Power {
         let mut rx = self.subscribe_power();
         let settled = |p: &Power| matches!(p, Power::Running | Power::Stopped | Power::Missing);
@@ -355,11 +373,19 @@ impl MachineRuntime {
         self.record.read().unwrap().upstream_token.clone()
     }
 
-    /// The machine's own descriptor, never Boat's fallback page for an unrouted port or an
-    /// error body. Cached for while the machine sleeps.
+    /// Reads `/.well-known/t3/environment` through Agent37's authenticated edge URL (never `/health`,
+    /// which Agent37 intercepts at the edge).
     pub async fn fetch_descriptor(&self) -> Option<Value> {
         let url = format!("{}/.well-known/t3/environment", self.upstream_url());
-        let res = self.shared.http.get(url).timeout(Duration::from_secs(3)).send().await.ok()?;
+        let res = self
+            .shared
+            .http
+            .get(url)
+            .headers(self.edge_headers())
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+            .ok()?;
         if !res.status().is_success() {
             return None;
         }
@@ -371,23 +397,12 @@ impl MachineRuntime {
         Some(v)
     }
 
-    /// Boat does not always restore hosted ports on resume.
-    async fn rehost(&self) -> Result<()> {
-        let (t3, watchdog) = provision::host(&self.shared.boat, &self.sandbox_id()).await?;
-        self.update_record(|m| {
-            m.upstream_url = t3;
-            m.watchdog_url = watchdog;
-        });
-        Ok(())
-    }
-
     /// Brings the machine up if needed and returns once its T3 server answers and will stay up.
     /// Concurrent callers share one wake.
     pub async fn ensure_awake(&self) -> Result<()> {
         let _guard = self.waking.lock().await;
-        // Checked under the lock: a delete holding it retires the machine.
         if self.power() == Power::Missing {
-            bail!("the sandbox no longer exists on Boat");
+            bail!("the instance no longer exists on Agent37");
         }
         if let Some((e, at)) = self.wake_failure.lock().unwrap().clone() {
             if at.elapsed() < WAKE_COOLDOWN {
@@ -395,32 +410,39 @@ impl MachineRuntime {
             }
         }
         if self.power() == Power::Running && !self.is_stopping() && self.fetch_descriptor().await.is_some() {
-            if self.watchdog_status().is_some_and(|w| matches!(w.phase, WatchdogPhase::Saving | WatchdogPhase::Draining)) {
-                // Someone needs it after all: call the sleep off before it stops.
+            if self
+                .watchdog_status()
+                .is_some_and(|w| matches!(w.phase, WatchdogPhase::Draining | WatchdogPhase::ReadyToSleep))
+            {
                 self.send_activity(false).await;
             }
-            // Too late if the watchdog is already stopping: wake_locked waits for it and resumes.
             if !self.is_stopping() {
                 if self.wake_failure.lock().unwrap().take().is_some() {
                     self.shared.changed();
                 }
-                // A message accepted while another caller's wake was finishing.
                 self.flush_deferred_commands().await;
                 return Ok(());
             }
         }
         let result = self.wake_locked().await;
         let was_failing = self.wake_failure.lock().unwrap().is_some();
-        match &result {
-            Ok(()) => *self.wake_failure.lock().unwrap() = None,
+        let failed = match &result {
+            Ok(()) => {
+                *self.wake_failure.lock().unwrap() = None;
+                false
+            }
             Err(e) => {
                 let msg = format!("{e:#}");
                 if !was_failing {
                     self.shared.notify(format!("{} could not wake", self.record().name), msg.clone());
                 }
                 *self.wake_failure.lock().unwrap() = Some((msg, Instant::now()));
-                let _ = self.refresh_power().await;
+                true
             }
+        };
+        drop(_guard);
+        if failed {
+            let _ = self.refresh_power().await;
         }
         self.shared.changed();
         result
@@ -432,52 +454,38 @@ impl MachineRuntime {
         let fresh = self.fresh_capture().is_some();
         self.set_power(Power::Starting);
         let mut resumed = false;
-        let mut restored = false;
         loop {
             match self.refresh_power().await? {
                 Power::Running => break,
                 Power::Stopped => {
-                    tracing::info!("resuming {id}");
+                    tracing::info!("waking Agent37 instance {id}");
                     self.set_power(Power::Starting);
-                    let record = self.record();
-                    if self.shared.boat.resume(&record.sandbox_id, &record.size).await? == Resume::DataExpired {
-                        self.restore().await?;
-                        restored = true;
-                    }
+                    self.shared.agent37.start(&self.sandbox_id()).await?;
                     resumed = true;
                     break;
                 }
-                Power::Missing => bail!("the sandbox no longer exists on Boat"),
+                Power::Missing => bail!("the instance no longer exists on Agent37"),
                 _ => {}
             }
             if started.elapsed() > READY_TIMEOUT {
-                bail!("the sandbox is stuck between states on Boat");
+                bail!("the instance is stuck between states on Agent37");
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        // From here on the machine runs: whatever it slept with is history. A sleep the proxy
-        // did not see may have outdated the recorded reads too.
         if !fresh {
             self.cache.lock().unwrap().bump_epoch();
         }
         self.drop_capture();
         self.set_power(Power::Starting);
-        if self.fetch_descriptor().await.is_none() {
-            self.rehost().await?;
-        }
-        self.wait_ready(started).await?;
+        // Fresh readiness budget after `start()` returns (a `202` host move may take >180s).
+        self.wait_ready_with_supervisor_fallback(Instant::now()).await?;
         if resumed {
-            // T3 serves now and may have started work on its own, or an agent waits on the user;
-            // restarting it would kill that. A restored machine booted fresh from its snapshot:
-            // nothing to kill, and the upgrade drops the snapshot's stale chats.
-            if !restored && self.watchdog_get("/status?fresh").await.is_ok_and(|s| s.busy || s.waiting_threads > 0) {
+            if self.watchdog_get("/t3boat-status?fresh").await.is_ok_and(|s| s.busy || s.waiting_threads > 0) {
                 tracing::info!("{id} is busy: upgrade deferred to the next wake");
             } else if let Err(e) = self.upgrade_if_needed().await {
                 tracing::warn!("upgrading {id}: {e:#}");
             }
         }
-        // Before Running is published: T3 Code reconnects then, and must find the messages
-        // accepted while asleep ahead of anything it sends next.
         self.on_ready().await;
         self.set_power(Power::Running);
         tracing::info!("{id} awake after {:?}", started.elapsed());
@@ -485,7 +493,6 @@ impl MachineRuntime {
         Ok(())
     }
 
-    /// T3 answers after a wake: sends what waited for it and refreshes the session.
     async fn on_ready(&self) {
         self.flush_deferred_commands().await;
         if let Err(e) = self.prime().await {
@@ -500,6 +507,7 @@ impl MachineRuntime {
             .shared
             .http
             .get(format!("{}/api/auth/session", self.upstream_url()))
+            .headers(self.edge_headers())
             .bearer_auth(self.upstream_token())
             .timeout(Duration::from_secs(10))
             .send()
@@ -513,8 +521,17 @@ impl MachineRuntime {
         Ok(())
     }
 
-    async fn wait_ready(&self, started: Instant) -> Result<()> {
+    /// Waits for `t3 serve` to answer. If the wake was a cold-storage fresh boot on a stock
+    /// `agent37-base` image, kicks `supervisor.mjs` via `exec` once if `:3773` hasn't come up yet.
+    async fn wait_ready_with_supervisor_fallback(&self, started: Instant) -> Result<()> {
+        let mut kicked = false;
+        let wait_start = Instant::now();
         while self.fetch_descriptor().await.is_none() {
+            if !kicked && wait_start.elapsed() >= SUPERVISOR_KICK_AFTER {
+                kicked = true;
+                tracing::info!("kicking supervisor on {} after fresh boot", self.id());
+                let _ = provision::ensure_supervisor_running(&self.shared.agent37, &self.sandbox_id()).await;
+            }
             if started.elapsed() > READY_TIMEOUT {
                 bail!("T3 on the machine did not answer");
             }
@@ -534,12 +551,11 @@ impl MachineRuntime {
         }
         tracing::info!("upgrading {} (T3 {desktop}, scripts {revision})", self.id());
         provision::run(
-            &self.shared.boat,
+            &self.shared.agent37,
             &record.sandbox_id,
             &record.name,
             &desktop,
             &record.watchdog_secret,
-            &provision::snapshot_name(&record.name, &record.id),
             false,
         )
         .await?;
@@ -551,7 +567,6 @@ impl MachineRuntime {
             let mut cache = self.cache.lock().unwrap();
             cache.bump_epoch();
             if new_server {
-                // Recorded streams and stored chats are in the old server's encoding.
                 cache.streams.clear();
             }
         }
@@ -559,11 +574,10 @@ impl MachineRuntime {
             threads::sweep(&self.dir, &HashSet::new());
             self.save_cache();
         }
-        self.wait_ready(Instant::now()).await
+        self.wait_ready_with_supervisor_fallback(Instant::now()).await
     }
 
     async fn flush_deferred_commands(&self) {
-        // Left queued until delivered: the run loop retries a failed send.
         let commands = self.cache.lock().unwrap().deferred_commands.clone();
         if commands.is_empty() {
             return;
@@ -572,10 +586,16 @@ impl MachineRuntime {
             .iter()
             .map(|c| ("orchestration.dispatchCommand".to_owned(), c.clone()))
             .collect();
-        match upstream::call_many(&self.upstream_url(), &self.upstream_token(), requests).await {
+        match upstream::call_many_with_headers(
+            &self.upstream_url(),
+            &self.upstream_token(),
+            &self.edge_headers(),
+            requests,
+        )
+        .await
+        {
             Ok(results) => {
                 self.cache.lock().unwrap().deferred_commands.retain(|c| !commands.contains(c));
-                // T3 Code was told they were accepted: a refused message is said here or nowhere.
                 for (command, result) in commands.iter().zip(results) {
                     if let Err(e) = result
                         && command["type"] == "message.dispatch"
@@ -585,7 +605,6 @@ impl MachineRuntime {
                     }
                 }
             }
-            // Resent on the next try; the server dedupes them by commandId.
             Err(e) => {
                 tracing::warn!("sending deferred commands: {e:#}");
                 return;
@@ -611,12 +630,10 @@ impl MachineRuntime {
         tokio::spawn(async move { this.send_activity(false).await });
     }
 
-    /// `resumed`: this app just resumed the sandbox. The watchdog was frozen mid-stop and, after
-    /// a short sleep, cannot tell: it would refuse activity and report a stop for another 90 s.
     async fn send_activity(&self, resumed: bool) {
         *self.last_heartbeat.lock().unwrap() = Some(Instant::now());
-        // Refused when the watchdog already stops the machine: watchdog_request records that.
         if let Ok(s) = self.watchdog_post("/activity", json!({ "resumed": resumed })).await {
+            self.record_watchdog_sample(&s);
             *self.watchdog.lock().unwrap() = Some(s);
             self.shared.changed();
         }
@@ -635,11 +652,15 @@ impl MachineRuntime {
             let m = self.record.read().unwrap();
             (format!("{}{path}", m.watchdog_url.trim_end_matches('/')), m.watchdog_secret.clone())
         };
-        // These routes reply after the watchdog's own T3 check, which allows itself 10 s. Older
-        // watchdogs check T3 inside the ack too.
-        let refreshes = matches!(path, "/status?fresh" | "/drain" | "/sleep-ack");
+        let refreshes = matches!(path, "/t3boat-status?fresh" | "/status?fresh" | "/drain" | "/sleep-ack");
         let timeout = Duration::from_secs(if refreshes { 15 } else { 4 });
-        let mut req = self.shared.http.request(method, url).bearer_auth(secret).timeout(timeout);
+        let mut req = self
+            .shared
+            .http
+            .request(method, url)
+            .headers(self.edge_headers())
+            .bearer_auth(secret)
+            .timeout(timeout);
         if let Some(body) = body {
             req = req.json(&body);
         }
@@ -647,13 +668,6 @@ impl MachineRuntime {
         let status = res.status();
         if status.as_u16() == 409 {
             let value: Value = res.json().await.unwrap_or_default();
-            // Refused mid-stop: recorded now, as Boat may freeze the machine before a next ask.
-            if value["phase"] == "stopping" {
-                if let Some(sequence) = value["manifest"]["sequence"].as_u64() {
-                    self.confirm_capture(sequence);
-                }
-                self.mark_stopping();
-            }
             bail!("{}", value["error"].as_str().unwrap_or("not now"));
         }
         if !status.is_success() {
@@ -662,94 +676,130 @@ impl MachineRuntime {
         Ok(res.json().await?)
     }
 
-    /// "Sleep now": asks the watchdog to drain. Refused while an agent works.
+    /// "Sleep now": asks the read-only watchdog to drain and publish its manifest; once captured
+    /// and confirmed, the proxy calls `POST /v1/instances/{id}/sleep` using its own `sk_live_` key.
     pub async fn sleep_now(&self) -> Result<()> {
         if !self.awake_now().await? {
             return Ok(());
         }
+        // Explicit user "Sleep now" overrides any background retry cooldown.
+        *self.sleep_failure.lock().unwrap() = None;
         let s = self.watchdog_post("/drain", json!({})).await?;
-        // Any use now calls the sleep off: the next user action must reach the watchdog.
         *self.last_heartbeat.lock().unwrap() = None;
         self.on_watchdog_status(s).await;
         Ok(())
     }
 
-    /// Keeps the machine up for `minutes` whether or not anyone uses it (`None`: until stopped);
-    /// `Some(0)` ends it. The watchdog enforces it, so it holds with the laptop closed too. Wakes a
-    /// sleeping machine to start.
+    /// Keeps the machine up for `minutes` (`None`: until stopped; `Some(0)`: re-enable auto-sleep).
     pub async fn keep_awake(&self, minutes: Option<u32>) -> Result<()> {
         if minutes.is_some_and(|m| m > MAX_KEEP_AWAKE_MINUTES) {
             bail!("keep awake takes at most {MAX_KEEP_AWAKE_MINUTES} minutes, or until stopped");
         }
-        // A stop ends any hold, so a machine that isn't running has none to end.
         if minutes == Some(0) && !self.awake_now().await? {
             return Ok(());
         }
         self.ensure_awake().await?;
-        // Older scripts lack keep-awake: take this app's now, which restarts T3, so never
-        // mid-turn or while an agent waits on the user. Ending a hold works with any watchdog
-        // that has one.
-        if minutes != Some(0) && self.record().provision_revision != provision::revision() {
-            let s = self.watchdog_get("/status?fresh").await?;
-            if s.busy || s.waiting_threads > 0 {
-                bail!("needs a quick update first; try again once no agent works or waits on you there");
-            }
-            self.kept_awake(self.upgrade_if_needed()).await?;
-        }
         let body = json!({ "minutes": minutes });
-        let s = match self.watchdog_post("/keep-awake", body.clone()).await {
-            Ok(s) => s,
-            // Refused mid-stop (watchdog_request recorded it): ending it is then already done;
-            // anything else waits for the stop, wakes the machine and asks again.
-            Err(_) if self.is_stopping() => {
-                if minutes == Some(0) {
-                    return Ok(());
-                }
-                self.ensure_awake().await?;
-                self.watchdog_post("/keep-awake", body).await?
-            }
-            Err(e) => return Err(e),
-        };
+        let s = self.watchdog_post("/keep-awake", body).await?;
         self.on_watchdog_status(s).await;
         Ok(())
     }
 
-    /// New size: applied on the next resume. An idle machine is restarted onto it right away,
-    /// keeping any "keep awake"; a working one (an agent or a build), or one where an agent waits
-    /// on the user (the restart would expire it), moves when it next sleeps.
-    pub async fn resize(&self, size: &str) -> Result<()> {
-        provision::size(size)?;
-        if self.record().size == size {
-            return Ok(());
+    /// Resizes CPU/RAM (`size_id`) and/or grows disk (`disk_gb`) via Agent37's
+    /// `POST /v1/instances/{id}/resize`.
+    ///
+    /// Agent37 requires the instance to be **running** to resize, and recreates the container
+    /// (losing in-memory state while keeping disk, ID, and URLs). Refuses mid-turn or while an
+    /// agent waits on a user approval.
+    pub async fn resize(&self, size_id: Option<&str>, disk_gb: Option<u32>) -> Result<()> {
+        // Fast pre-check before waking (authoritative read & validation happen under `waking`).
+        {
+            let current = self.record();
+            let target_size = agent37::shape(size_id.unwrap_or(&current.size))?.id;
+            let current_size = agent37::shape(&current.size).map(|s| s.id).unwrap_or(current.size.as_str());
+            let target_disk = disk_gb.unwrap_or(current.disk_gb);
+            if target_disk < current.disk_gb {
+                bail!("Agent37 disks can only grow, never shrink (current: {} GB)", current.disk_gb);
+            }
+            agent37::validate_shape_and_disk(current.instance_type, target_size, Some(target_disk))?;
+            if target_size == current_size && target_disk == current.disk_gb {
+                return Ok(());
+            }
         }
-        self.update_record(|m| m.size = size.to_owned());
-        if self.settled_power().await != Power::Running {
-            return Ok(());
-        }
-        let status = match self.watchdog_get("/status").await {
-            Ok(s) if !s.busy && s.waiting_threads == 0 => s,
-            _ => return Ok(()),
+
+        // Agent37 returns 400 on resize while asleep/stopped: wake first.
+        self.ensure_awake().await?;
+        let outcome = {
+            let _guard = self.waking.lock().await;
+            if self.power() != Power::Running || self.is_stopping() {
+                bail!("machine stopped before resize could start; try again");
+            }
+            // Authoritative record snapshot under `waking` so concurrent resizes never clobber
+            // each other's shape or disk size.
+            let current = self.record();
+            let target_size = agent37::shape(size_id.unwrap_or(&current.size))?.id;
+            let current_size = agent37::shape(&current.size).map(|s| s.id).unwrap_or(current.size.as_str());
+            let target_disk = disk_gb.unwrap_or(current.disk_gb);
+            if target_disk < current.disk_gb {
+                bail!("Agent37 disks can only grow, never shrink (current: {} GB)", current.disk_gb);
+            }
+            let resources = agent37::validate_shape_and_disk(current.instance_type, target_size, Some(target_disk))?;
+            let size_changed = target_size != current_size;
+            let disk_changed = target_disk != current.disk_gb;
+            if !size_changed && !disk_changed {
+                return Ok(());
+            }
+
+            let s = self.watchdog_get("/t3boat-status?fresh").await?;
+            if s.busy {
+                bail!("an agent or build is working; wait for it to finish before resizing");
+            }
+            if s.waiting_threads > 0 {
+                bail!("an agent is waiting on you; answer it before resizing (resizing restarts the container)");
+            }
+
+            self.set_power(Power::Starting);
+            let (cpu, mem) = if size_changed { (Some(resources.cpu), Some(resources.memory)) } else { (None, None) };
+            let disk = disk_changed.then_some(resources.disk);
+            let step: Result<()> = async {
+                let updated = self.shared.agent37.resize(&current.sandbox_id, cpu, mem, disk).await?;
+                let confirmed_disk = updated
+                    .resources
+                    .filter(|r| r.disk > 0)
+                    .map(|r| r.disk)
+                    .unwrap_or(resources.disk);
+                self.update_record(|m| {
+                    if size_changed {
+                        m.size = target_size.to_owned();
+                    }
+                    if disk_changed || confirmed_disk > m.disk_gb {
+                        m.disk_gb = confirmed_disk;
+                    }
+                });
+                self.cache.lock().unwrap().bump_epoch();
+                self.drop_capture();
+                self.wait_ready_with_supervisor_fallback(Instant::now()).await?;
+                self.on_ready().await;
+                self.set_power(Power::Running);
+                self.send_activity(true).await;
+                Ok(())
+            }
+            .await;
+            step
         };
-        // The sleep ends any hold: it is taken again after the restart.
-        let hold = match (status.keep_awake_forever, status.keep_awake_secs) {
-            (true, _) => Some(None),
-            (false, 0) => None,
-            (false, secs) => Some(Some(secs.div_ceil(60) as u32)),
-        };
-        if self.sleep_now().await.is_err() {
-            return Ok(());
+        if outcome.is_err() {
+            let _ = self.refresh_power().await;
         }
-        // The drain dropped the hold even if the sleep was called off.
-        let slept = self.slept().await;
-        match hold {
-            Some(minutes) => self.keep_awake(minutes).await?,
-            None if slept => self.ensure_awake().await?,
-            None => {}
-        }
-        Ok(())
+        outcome
     }
 
-    /// For actions on a running machine: true when it runs, false when it sleeps (or is gone).
+    /// Updates Agent37's platform-side `auto_sleep` safety fuse without restarting the instance.
+    pub async fn sync_auto_sleep_fuse(&self, fuse_minutes: Option<u32>) -> Result<()> {
+        let on = fuse_minutes.is_some();
+        let secs = fuse_minutes.map(|m| m.saturating_mul(60));
+        self.shared.agent37.patch_auto_sleep(&self.sandbox_id(), on, secs).await
+    }
+
     async fn awake_now(&self) -> Result<bool> {
         match self.settled_power().await {
             Power::Running => Ok(true),
@@ -758,35 +808,26 @@ impl MachineRuntime {
         }
     }
 
-    /// Waits for a sleep just asked for, snapshot save included: true once the machine is
-    /// stopped, false if it was used meanwhile and stays up.
-    async fn slept(&self) -> bool {
-        let deadline = Instant::now() + SLEEP_TIMEOUT;
-        while Instant::now() < deadline {
-            match self.power() {
-                Power::Stopped => return true,
-                Power::Missing => return false,
-                Power::Running
-                    if !self.is_stopping()
-                        && self.watchdog_status().is_none_or(|w| w.phase == WatchdogPhase::Active) =>
-                {
-                    return false
-                }
-                _ => {}
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+    fn record_watchdog_sample(&self, s: &WatchdogStatus) {
+        if let Some(disk) = &s.disk {
+            *self.last_disk.lock().unwrap() = Some(disk.clone());
         }
-        false
     }
 
     async fn on_watchdog_status(&self, s: WatchdogStatus) {
+        self.record_watchdog_sample(&s);
         if s.busy {
             self.cache.lock().unwrap().bump_epoch();
         }
         if s.phase == WatchdogPhase::Active {
-            // Back in use after a drain: an earlier capture no longer describes the machine.
             self.drop_capture();
-            *self.stop_seen.lock().unwrap() = None;
+            // Hold `waking` while checking power and clearing `stop_seen` so a concurrent
+            // `drive_proxy_sleep` cannot acquire `waking` and set `stop_seen` in between.
+            if let Ok(_waking) = self.waking.try_lock()
+                && self.power() == Power::Running
+            {
+                *self.stop_seen.lock().unwrap() = None;
+            }
         }
         if self.record.read().unwrap().next_due_at != s.next_due_at {
             self.update_record(|r| r.next_due_at = s.next_due_at);
@@ -795,67 +836,103 @@ impl MachineRuntime {
         let phase = s.phase;
         *self.watchdog.lock().unwrap() = Some(s);
         self.shared.changed();
-        match (phase, manifest) {
-            // Captured during the watchdog's own save too: the chats then need no billable wake
-            // once it stops.
-            (WatchdogPhase::Saving | WatchdogPhase::Draining, Some(m)) => {
-                {
-                    // Whoever waited here finds the capture done, and must not redo it: it may
-                    // be confirmed by now.
-                    let _capturing = self.capturing.lock().await;
-                    if self.captured_sequence() != Some(m.sequence) {
-                        self.drop_capture();
-                        if let Err(e) = self.capture(&m).await {
-                            tracing::warn!("capture failed for {}: {e:#}", self.id());
-                            return;
-                        }
-                    }
-                }
-                // Acked only while draining: a reply still saving would re-ack in a loop.
-                if phase == WatchdogPhase::Draining {
-                    match self.watchdog_post("/sleep-ack", json!({ "sequence": m.sequence })).await {
-                        // Accepted: the watchdog now stops only on a next tick at this sequence,
-                        // which a poll can miss before Boat freezes the machine. Any later use
-                        // ends in a new drain, recaptured, or a stop too late for fresh_capture.
-                        Ok(s) if s.phase == WatchdogPhase::Draining => {
-                            if s.manifest.as_ref().is_some_and(|r| r.sequence == m.sequence) {
-                                self.confirm_capture(m.sequence);
-                            }
-                        }
-                        // Refused as its own save began ("saving": never confirmed, as that save
-                        // delays the stop), or an older watchdog that stopped inside the ack.
-                        Ok(s) => Box::pin(self.on_watchdog_status(s)).await,
-                        Err(_) => {}
-                    }
-                }
-            }
-            // Stopping without a manifest (the watchdog could not read it) still stops: only
-            // the capture goes unconfirmed.
-            (WatchdogPhase::Stopping, m) => {
-                if let Some(m) = m {
-                    self.confirm_capture(m.sequence);
-                }
-                self.mark_stopping();
-            }
-            _ => {}
+
+        if matches!(phase, WatchdogPhase::Draining | WatchdogPhase::ReadyToSleep) {
+            self.drive_proxy_sleep(manifest).await;
         }
     }
 
-    /// Known before Boat says so: new sockets and wakes wait for the stop instead of reaching a
-    /// machine that is about to freeze.
+    /// Proxy-driven sleep: captures shell/threads/assets at the watchdog's manifest, acquires
+    /// `self.waking` (in fixed order `capturing` -> `waking`) so `ensure_awake`/`resize` cannot
+    /// interleave, re-confirms `/sleep-ack` (even when `manifest` is `None`), and calls Agent37
+    /// `POST /sleep`.
+    async fn drive_proxy_sleep(&self, manifest: Option<Manifest>) {
+        if self.sleep_failure.lock().unwrap().is_some_and(|at| at.elapsed() < SLEEP_COOLDOWN) {
+            return;
+        }
+        let _capturing = self.capturing.lock().await;
+        if self.power() != Power::Running || self.is_stopping() {
+            return;
+        }
+        if let Some(ref m) = manifest {
+            if self.captured_sequence() != Some(m.sequence) {
+                self.drop_capture();
+                if let Err(e) = self.capture(m).await {
+                    tracing::warn!("capture failed for {}: {e:#}", self.id());
+                    return;
+                }
+            }
+        }
+
+        // Serialize final ack + Agent37 sleep with `ensure_awake` / `resize` / `delete`.
+        let _waking = self.waking.lock().await;
+        if self.power() != Power::Running || self.is_stopping() {
+            return;
+        }
+        let seq = manifest.as_ref().map(|m| m.sequence);
+        match self.watchdog_post("/sleep-ack", json!({ "sequence": seq })).await {
+            Ok(ack) if ack.phase == WatchdogPhase::Active => {
+                // Activity or new events arrived before ack: abort sleep cleanly.
+                self.drop_capture();
+                *self.watchdog.lock().unwrap() = Some(ack);
+                self.shared.changed();
+                return;
+            }
+            Ok(ack)
+                if (ack.ready_to_sleep || ack.phase == WatchdogPhase::ReadyToSleep)
+                    && ack.manifest.as_ref().map(|m| m.sequence) == seq =>
+            {
+                if let Some(s) = seq {
+                    self.confirm_capture(s);
+                }
+                *self.watchdog.lock().unwrap() = Some(ack);
+            }
+            Ok(ack) => {
+                // Watchdog is not ready or its manifest moved ahead of what we captured: abort
+                // this sleep attempt so the next poll recaptures the newer sequence.
+                *self.watchdog.lock().unwrap() = Some(ack);
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("sleep-ack failed for {}: {e:#}", self.id());
+                return;
+            }
+        }
+
+        // Now ask Agent37 to CRIU-checkpoint the instance (compute billing drops to $0).
+        // Keep `stop_seen` set until `refresh_power()` sees Agent37 report `Stopped` so a
+        // stale `"running"` poll during checkpoint write cannot flip power back to Running.
+        self.mark_stopping();
+        let id = self.sandbox_id();
+        tracing::info!("putting Agent37 instance {} to sleep (checkpoint)", self.id());
+        match self.shared.agent37.sleep(&id).await {
+            Ok(()) => {
+                *self.sleep_failure.lock().unwrap() = None;
+                *self.stopped_at.lock().unwrap() = Some(chrono::Utc::now());
+                self.set_power(Power::Stopped);
+            }
+            Err(e) => {
+                tracing::warn!("Agent37 sleep failed for {}: {e:#}", self.id());
+                *self.sleep_failure.lock().unwrap() = Some(Instant::now());
+                *self.stop_seen.lock().unwrap() = None;
+                drop(_waking);
+                let _ = self.refresh_power().await;
+            }
+        }
+    }
+
     fn mark_stopping(&self) {
         self.stop_seen.lock().unwrap().get_or_insert_with(Instant::now);
         self.set_power(Power::Stopping);
     }
 
-    /// Background loop: follows the machine's power state and its watchdog.
+    /// Background loop: follows the machine's power state on Agent37 and polls its read-only watchdog.
     pub async fn run(self: Arc<Self>) {
         let unprimed = {
             let c = self.cache.lock().unwrap();
             c.descriptor.is_none() || c.auth_session.is_none()
         };
         if unprimed {
-            // Without these T3 Code cannot even connect while the machine sleeps.
             let primed = async {
                 self.ensure_awake().await?;
                 self.prime().await
@@ -864,48 +941,32 @@ impl MachineRuntime {
                 tracing::warn!("priming {}: {e:#}", self.id());
             }
         }
-        let mut last_boat_poll: Option<Instant> = None;
-        let mut last_keep_alive: Option<Instant> = None;
+        let mut last_api_poll: Option<Instant> = None;
         let mut last_due_wake: Option<Instant> = None;
         let mut last_link_check: Option<Instant> = None;
+        let mut power_rx = self.subscribe_power();
         let mut watchdog_failures = 0u32;
         let mut was_busy = false;
         let mut was_running = false;
         loop {
             let transitioning = matches!(self.power(), Power::Stopping | Power::Starting | Power::Unknown);
-            if transitioning || last_boat_poll.is_none_or(|t| t.elapsed() >= BOAT_POLL) || watchdog_failures >= 2 {
-                last_boat_poll = Some(Instant::now());
+            if transitioning || last_api_poll.is_none_or(|t| t.elapsed() >= API_POLL) || watchdog_failures >= 2 {
+                last_api_poll = Some(Instant::now());
                 watchdog_failures = 0;
                 if let Err(e) = self.refresh_power().await {
-                    tracing::warn!("boat info {}: {e:#}", self.id());
+                    tracing::warn!("agent37 info {}: {e:#}", self.id());
                 }
             }
             if self.power() == Power::Missing {
                 return;
             }
-            if self.needs_keep_alive() && last_keep_alive.is_none_or(|t| t.elapsed() >= KEEP_ALIVE_RETRY) {
-                // Boat keeps a stopped disk 14 days; a short wake renews it. The watchdog
-                // puts the machine back to sleep after the usual delay. With this app not
-                // running that long, the machine is restored from its snapshot instead.
-                last_keep_alive = Some(Instant::now());
-                tracing::info!("keep-alive wake for {}", self.id());
-                if let Err(e) = self.ensure_awake().await {
-                    tracing::warn!("keep-alive wake for {}: {e:#}", self.id());
-                }
-            }
             let due = self.scheduled_wake().is_some_and(|due| chrono::Utc::now() >= due - DUE_LEAD);
-            if (due || self.has_queued_wake())
-                && last_due_wake.is_none_or(|t| t.elapsed() >= DUE_WAKE_RETRY)
-            {
+            if (due || self.has_queued_wake()) && last_due_wake.is_none_or(|t| t.elapsed() >= DUE_WAKE_RETRY) {
                 last_due_wake = Some(Instant::now());
                 tracing::info!("waking {} for work due", self.id());
                 if let Err(e) = self.ensure_awake().await {
                     tracing::warn!("waking {} for work due: {e:#}", self.id());
                 }
-            }
-            if let Some((sandbox, stop)) = self.begin_save() {
-                let this = self.clone();
-                tokio::spawn(async move { this.save_snapshot(sandbox, stop).await });
             }
             let running = self.power() == Power::Running;
             let came_up = running && !was_running;
@@ -921,23 +982,21 @@ impl MachineRuntime {
                         if came_up {
                             this.refresh_projects().await;
                             this.refresh_connect().await;
+                            this.refresh_github().await;
                         }
                     });
                 }
-                // Retries a send that failed during the wake.
                 self.flush_deferred_commands().await;
-                match self.watchdog_get("/status").await {
+                match self.watchdog_get("/t3boat-status").await {
                     Ok(s) => {
                         watchdog_failures = 0;
                         if was_busy && !s.busy {
-                            // The turn's last edits may have landed after the last busy poll.
                             self.cache.lock().unwrap().bump_epoch();
                             let this = self.clone();
                             tokio::spawn(async move { this.refresh_projects().await });
                         }
                         was_busy = s.busy;
                         if !s.agents_unknown && self.wake_failure.lock().unwrap().take().is_some() {
-                            // A failed wake came up after all: T3 answers.
                             self.shared.changed();
                             let this = self.clone();
                             tokio::spawn(async move { this.on_ready().await });
@@ -947,25 +1006,39 @@ impl MachineRuntime {
                     Err(_) => watchdog_failures += 1,
                 }
             }
-            tokio::time::sleep(WATCHDOG_POLL).await;
+            // Read & mark seen BEFORE computing `sleep_for` so a concurrent Stopped -> Running
+            // change can never be swallowed before entering `select!`.
+            let current_power = *power_rx.borrow_and_update();
+            let sleep_for = if current_power == Power::Stopped {
+                let until_due = self
+                    .scheduled_wake()
+                    .and_then(|d| ((d - DUE_LEAD) - chrono::Utc::now()).to_std().ok())
+                    .unwrap_or(API_POLL);
+                until_due.min(API_POLL).max(Duration::from_secs(1))
+            } else {
+                WATCHDOG_POLL
+            };
+            tokio::select! {
+                _ = tokio::time::sleep(sleep_for) => {}
+                _ = power_rx.changed() => {}
+            }
         }
     }
 
-    /// When work T3 starts on its own (an automation, ...) comes due on a sleeping machine, which
-    /// wakes for it as an always-on server would run it. Only work due after it went to sleep:
-    /// what came due while it ran had its chance.
     pub fn scheduled_wake(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         let due = chrono::DateTime::from_timestamp_millis(self.record.read().unwrap().next_due_at?)?;
         let stopped_at = (*self.stopped_at.lock().unwrap())?;
         (self.power() == Power::Stopped && due > stopped_at).then_some(due)
     }
 
-    /// A message T3 Code was told is sent, still queued on a sleeping machine: its wake failed
-    /// or never ran.
     fn has_queued_wake(&self) -> bool {
         self.power() == Power::Stopped
-            && self.cache.lock().unwrap().deferred_commands.iter().any(|c| {
-                c["type"].as_str().is_some_and(|k| classify::WAKING_COMMANDS.contains(&k))
-            })
+            && self
+                .cache
+                .lock()
+                .unwrap()
+                .deferred_commands
+                .iter()
+                .any(|c| c["type"].as_str().is_some_and(|k| classify::WAKING_COMMANDS.contains(&k)))
     }
 }

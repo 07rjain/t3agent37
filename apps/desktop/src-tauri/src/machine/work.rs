@@ -22,7 +22,7 @@ impl MachineRuntime {
     pub async fn check_idle_before_delete(&self) -> Result<()> {
         match self.settled_power().await {
             Power::Stopped | Power::Missing => Ok(()),
-            Power::Running if self.watchdog_get("/status?fresh").await?.busy => {
+            Power::Running if self.watchdog_get("/t3boat-status?fresh").await?.busy => {
                 bail!("work is still running on it (an agent or a build); wait for it to finish, or delete and discard")
             }
             Power::Running => Ok(()),

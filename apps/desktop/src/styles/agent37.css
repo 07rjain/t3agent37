@@ -1,0 +1,162 @@
+/* ── agent37: disk, shapes, api key ──────────────────── */
+
+/* four footer stats instead of three */
+.costs {
+  grid-template-columns: none;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+}
+.costs .cost {
+  padding: 9px 10px 10px 12px;
+}
+
+.row-spec {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 400 10px/1.2 var(--font-mono);
+  color: var(--muted);
+}
+.row-note.is-warn {
+  color: var(--danger);
+}
+
+.glance-disk {
+  margin-top: 2px;
+}
+
+.size.is-off {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.size.is-off:hover {
+  border-color: var(--line);
+}
+
+.disk-pick {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.range {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.disk-pick-value {
+  flex: none;
+  min-width: 46px;
+  text-align: right;
+  font: 600 13px var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.disk {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 6px;
+}
+.disk-bar {
+  height: 6px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+.disk-bar i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+/* ── web daemon dashboard shell ─────────────────────── */
+.app-root {
+  width: 100%;
+  height: 100%;
+}
+
+.web-shell {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: radial-gradient(circle at 50% 0%, rgba(74, 158, 255, 0.08), transparent 60%), #090b10;
+}
+
+.app.is-web {
+  width: min(440px, 100%);
+  height: min(700px, 100%);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+}
+
+.live-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 8px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(52, 211, 153, 0.35);
+  background: rgba(16, 185, 129, 0.14);
+  color: #6ee7b7;
+  font: 500 10px/1.2 var(--font-mono);
+  vertical-align: middle;
+}
+
+.live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #34d399;
+  box-shadow: 0 0 8px #34d399;
+}
+.disk.is-warn .disk-bar i {
+  background: var(--danger);
+}
+.disk-text {
+  font: 400 11px var(--font-mono);
+  color: var(--muted);
+}
+.disk-warn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.disk-grow-link {
+  padding: 0;
+  font-size: inherit;
+}
+
+.api-key {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+.api-key .btn-lg {
+  margin-top: 2px;
+}
+.api-key-show {
+  flex: none;
+  font: 400 11px var(--font-mono);
+}
+.api-key-get {
+  align-self: flex-start;
+}
+.api-key .prompt-input input {
+  font-size: 13px;
+}
+
+.prompt-input-sm {
+  height: 34px;
+}
+.prompt-input-sm input {
+  font-size: 13px;
+}

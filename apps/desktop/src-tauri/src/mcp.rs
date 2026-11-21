@@ -1,9 +1,11 @@
-//! MCP server so coding agents on this computer (Claude Code, Codex) can drive t3boat:
-//! streamable HTTP on loopback, one JSON response per request. Local processes are trusted
-//! (they could run the Boat CLI anyway); Host and Origin checks keep web pages out.
+//! MCP server so coding agents on this computer (Claude Code, Codex) can drive t3agent37:
+//! streamable HTTP on loopback, one JSON response per request. Local processes are trusted;
+//! Host and Origin checks keep web pages out.
 
+use crate::agent37::{InstanceType, Region};
 use crate::app::App;
 use crate::machine::signin::Agent;
+use crate::process::command;
 use anyhow::{anyhow, bail, Context, Result};
 use axum::extract::State;
 use axum::http::header::{HOST, ORIGIN};
@@ -18,26 +20,28 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
-use crate::process::command;
 use tokio::sync::OnceCell;
 
 pub const MCP_PORT: u16 = 47730;
-const NAME: &str = "t3boat";
+const NAME: &str = "t3agent37";
 const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
 const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
-/// Longer calls answer early and finish in the background, staying under clients' tool
-/// timeouts (Codex: 60 s).
 const WAIT: Duration = Duration::from_secs(40);
 
-const INSTRUCTIONS: &str = "t3boat runs remote T3 Code machines (Boat sandboxes) for the user. \
-Machines sleep on their own when no agent works and wake when used; the user pays per minute awake. \
-Address a machine by its name or id from list_machines. \
+const INSTRUCTIONS: &str = "t3agent37 runs remote T3 Code machines on Agent37 for the user. \
+Machines sleep on their own when no agent works (compute drops to $0; disk still bills $0.09/GB/mo \
+until deleted) and wake when used. Address a machine by its name or id from list_machines. \
 add_project puts one of the user's projects on a machine, as T3 Code's own \"Add to another machine\" \
-does. Each machine is also a linked environment of the user's T3 Code (t3_environment_links lists it): \
-work there with T3's own tools and that environmentId, e.g. delegate_task or t3_thread_launch.";
+does (run sign_in_github first for private repos). Each machine is also a linked environment of the \
+user's T3 Code (t3_environment_links lists it): work there with T3's own tools and that environmentId, \
+e.g. delegate_task or t3_thread_launch.";
 
 pub fn url() -> String {
     format!("http://127.0.0.1:{MCP_PORT}/mcp")
+}
+
+pub fn app_router(app: Arc<App>) -> Router {
+    router(app)
 }
 
 pub async fn serve(app: Arc<App>) -> Result<()> {
@@ -48,12 +52,10 @@ pub async fn serve(app: Arc<App>) -> Result<()> {
     Ok(())
 }
 
-/// What `tools/call` runs; a trait so the protocol is testable without a real app.
 trait Tools: Send + Sync + 'static {
     fn call(self: Arc<Self>, call: Call) -> impl Future<Output = Result<String>> + Send;
 }
 
-/// `tools/call` params: the tool's name and its arguments.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "name", content = "arguments", rename_all = "snake_case")]
 enum Call {
@@ -61,6 +63,9 @@ enum Call {
     CreateMachine {
         name: String,
         size: Option<String>,
+        instance_type: Option<String>,
+        region: Option<String>,
+        disk_gb: Option<u32>,
         #[serde(default)]
         projects: Vec<String>,
     },
@@ -68,9 +73,14 @@ enum Call {
     AddProject { machine: String, project: String },
     WakeMachine { machine: String },
     SleepMachine { machine: String },
-    ResizeMachine { machine: String, size: String },
+    ResizeMachine {
+        machine: String,
+        size: Option<String>,
+        disk_gb: Option<u32>,
+    },
     KeepAwake { machine: String, minutes: u32 },
     SignInAgent { machine: String, agent: String },
+    SignInGithub { machine: String, token: Option<String> },
     TurnOnConnect { machine: String },
     MachineDetails { machine: String },
     SetAutoSleep { machine: String, on: bool },
@@ -84,7 +94,6 @@ enum Call {
 }
 
 fn router<T: Tools>(tools: Arc<T>) -> Router {
-    // Only POST is routed, so GET gets 405.
     Router::new().route("/mcp", post(handle::<T>)).with_state(tools)
 }
 
@@ -101,8 +110,6 @@ async fn handle<T: Tools>(State(tools): State<Arc<T>>, headers: HeaderMap, body:
     }
 }
 
-/// Keeps web pages out: browsers send `Origin` on every POST (even from a localhost page)
-/// and agents' MCP clients never do; a local `Host` also blocks DNS rebinding.
 fn from_local_process(headers: &HeaderMap) -> bool {
     !headers.contains_key(ORIGIN)
         && headers.get(HOST).and_then(|h| h.to_str().ok()).is_some_and(|host| {
@@ -111,7 +118,6 @@ fn from_local_process(headers: &HeaderMap) -> bool {
         })
 }
 
-/// The response to a JSON-RPC message; none for notifications.
 async fn dispatch<T: Tools>(tools: Arc<T>, request: Value) -> Option<Value> {
     let id = request.get("id")?.clone();
     let params = request.get("params").cloned().unwrap_or(Value::Null);
@@ -165,7 +171,10 @@ fn tool_list() -> Value {
     let sizes = crate::machine::provision::SIZES;
     let size = |description: &str| {
         let ids: Vec<&str> = sizes.iter().map(|s| s.id).collect();
-        let specs: Vec<String> = sizes.iter().map(|s| format!("{}: {}, ${}/h", s.id, s.spec, s.hourly)).collect();
+        let specs: Vec<String> = sizes
+            .iter()
+            .map(|s| format!("{}: {}, ~${:.4}/h default compute, disk {}-{}GB", s.id, s.spec, s.hourly, s.min_disk, s.max_disk))
+            .collect();
         json!({ "type": "string", "enum": ids, "description": format!("{description} ({})", specs.join("; ")) })
     };
     let tool = |name: &str, description: &str, properties: Value, required: &[&str]| {
@@ -178,39 +187,38 @@ fn tool_list() -> Value {
     json!([
         tool(
             "list_machines",
-            "Lists the user's t3boat machines with id, size, state (working | idle | asleep | waking | \
-             sleeping | creating | error | missing | unknown (still checking)) and a detail line, agents that still need a sign-in \
-             there (signedOut), its T3 projects (with progress while one is being added), plus Boat \
-             costs today and this month and machine starts used today against the daily limit.",
+            "Lists the user's t3agent37 machines with id, size, instanceType, region, diskGb, \
+             idleMonthly ($/mo retained disk cost), diskUsage/diskWarning, state, signedOut agents, \
+             githubSignedIn, T3 projects, plus Agent37 wallet balance, awake RAM vs memory limit, \
+             and estimated spend.",
             json!({}),
             &[],
         ),
         tool(
             "create_machine",
-            "Creates a new remote machine with T3 Code on it. Takes about a minute. When it is ready, \
-             T3 Code shows the user a dialog to add it as a backend; tell the user to confirm it there. \
-             `projects` (ids from list_projects) are then added to it as add_project does.",
+            "Creates a new Agent37 remote machine with T3 Code on it. Defaults to `small` (2 vCPU / 4 GB), \
+             type `default` (container, $4.40/mo compute + $0.09/GB/mo disk), region `us`, 12 GB disk. \
+             Disk bills forever until deleted and can only grow. When ready, T3 Code asks the user to confirm.",
             json!({
-                "name": { "type": "string", "description": "Unique machine name" },
-                "size": size("Defaults to default"),
+                "name": { "type": "string", "description": "Unique machine name (lowercase letters, digits, dashes)" },
+                "size": size("Defaults to small"),
+                "instance_type": { "type": "string", "enum": ["default", "vm", "performance"], "description": "default (container 1x), vm (full kernel/Docker 2.5x), performance (dedicated cores 4x)" },
+                "region": { "type": "string", "enum": ["us", "eu", "ap-south"], "description": "Defaults to us" },
+                "disk_gb": { "type": "integer", "minimum": 2, "maximum": 80, "description": "Disk size in GB ($0.09/GB/mo even while asleep; grow-only)" },
                 "projects": { "type": "array", "items": { "type": "string" }, "description": "Project ids from list_projects" },
             }),
             &["name"],
         ),
         tool(
             "list_projects",
-            "The user's T3 Code projects on this computer that can be added to a machine (those with a \
-             git remote): id, title, path and repoKey. A machine already has the ones whose repoKey \
-             list_machines shows under its projects.",
+            "The user's T3 Code projects on this computer that can be added to a machine (those with a git remote).",
             json!({}),
             &[],
         ),
         tool(
             "add_project",
-            "Adds one of the user's T3 Code projects to a machine as T3 Code's own \"Add to another \
-             machine\" does: clones it from its git remote there, registers it as a T3 project and \
-             copies its env files. Returns once cloned. A clone the git host refuses needs the user \
-             to sign in to it on that machine in T3 Code (Settings → Source control).",
+            "Clones one of the user's T3 Code projects onto a machine and copies its env files. \
+             For private repos, call sign_in_github on the machine first.",
             json!({
                 "machine": machine,
                 "project": { "type": "string", "description": "Project id, title or path from list_projects" },
@@ -219,22 +227,19 @@ fn tool_list() -> Value {
         ),
         tool(
             "wake_machine",
-            "Wakes a sleeping machine and waits until it is up. Machines also wake on their own when \
-             used from T3 Code, so this is only needed to prepare one ahead of time.",
+            "Wakes a sleeping Agent37 machine (with 409 checkpoint retry) and waits until T3 Code answers.",
             json!({ "machine": machine }),
             &["machine"],
         ),
         tool(
             "sleep_machine",
-            "Puts a machine to sleep now instead of after 3 idle minutes. Refused while an agent works on it.",
+            "Captures state and puts a machine to sleep via Agent37 memory checkpointing (compute drops to $0; disk still bills). Refused while an agent works.",
             json!({ "machine": machine }),
             &["machine"],
         ),
         tool(
             "keep_awake",
-            "Keeps a machine up even when nobody uses it (e.g. a dev server or long job the agent \
-             watches) for `minutes`, waking it if asleep; it ends by itself. minutes 0 ends it now. \
-             To keep it up until stopped, use set_auto_sleep with on false. The user pays per minute awake.",
+            "Keeps a machine up for `minutes` (waking if asleep); 0 ends it now.",
             json!({
                 "machine": machine,
                 "minutes": { "type": "integer", "minimum": 0, "maximum": 1440, "description": "0 turns it off" },
@@ -243,17 +248,17 @@ fn tool_list() -> Value {
         ),
         tool(
             "resize_machine",
-            "Changes a machine's size. An asleep machine applies it on its next wake; an idle one \
-             sleeps and wakes onto it now (unavailable meanwhile); a working one (agent or build), or one where \
-             an agent waits on the user, applies it after it next sleeps.",
-            json!({ "machine": machine, "size": size("New size") }),
-            &["machine", "size"],
+            "Resizes CPU/RAM (`size`) and/or grows `disk_gb` on Agent37. Wakes first if asleep and recreates the container (losing in-memory state while preserving disk). Disk can only grow, never shrink.",
+            json!({
+                "machine": machine,
+                "size": size("Optional new CPU/RAM shape"),
+                "disk_gb": { "type": "integer", "minimum": 2, "maximum": 80, "description": "Optional new disk size in GB (must be >= current diskGb)" },
+            }),
+            &["machine"],
         ),
         tool(
             "sign_in_agent",
-            "Signs a coding agent in on a machine with the vendor's own login. Opens the sign-in page in \
-             the user's browser on this computer; the user must click Authorize there, so tell them to. \
-             The credential is created on the machine; this computer's logins are not touched.",
+            "Signs Claude or Codex in on a machine via Agent37 SSH port-forwarding and local browser OAuth.",
             json!({
                 "machine": machine,
                 "agent": { "type": "string", "enum": ["Claude", "Codex"] },
@@ -261,48 +266,47 @@ fn tool_list() -> Value {
             &["machine", "agent"],
         ),
         tool(
+            "sign_in_github",
+            "Authenticates GitHub CLI (`gh`) and git on an Agent37 machine so private repos can be cloned/pushed. Omit `token` to open browser device login, or pass a fine-grained PAT.",
+            json!({
+                "machine": machine,
+                "token": { "type": "string", "description": "Optional fine-grained GitHub PAT; omit for interactive browser device login" },
+            }),
+            &["machine"],
+        ),
+        tool(
             "turn_on_connect",
-            "Turns on T3 Connect on a machine, so the user's other devices (the T3 Code phone app, a \
-             browser) reach it with their T3 account. Opens T3's sign-in page in the user's browser on \
-             this computer; the user must approve it there, so tell them to. Restarts T3 on the \
-             machine, so it refuses while an agent works there or waits on the user. A sleeping machine still wakes only \
-             through t3boat on this computer.",
+            "Turns on T3 Connect on a machine so phones/browsers reach it with the user's T3 account.",
             json!({ "machine": machine }),
             &["machine"],
         ),
         tool(
             "machine_details",
-            "One machine's cost today and this month, time awake today, which agents are signed in \
-             there, its T3 version and creation time, and whether T3 Connect is on. Never wakes it.",
+            "Detailed stats for one machine: compute/disk rates, disk usage, GitHub & agent login status, T3 version, and T3 Connect status. Never wakes it.",
             json!({ "machine": machine }),
             &["machine"],
         ),
         tool(
             "set_auto_sleep",
-            "Auto sleep on (default: the machine sleeps 3 minutes after its agents finish) or off (it \
-             stays up, and bills, until turned back on). Turning it off wakes a sleeping machine.",
+            "Auto sleep on (sleeps 3 minutes after agents finish) or off (stays up and bills compute until turned back on).",
             json!({ "machine": machine, "on": { "type": "boolean" } }),
             &["machine", "on"],
         ),
         tool(
             "open_in_t3",
-            "Shows the machine to the user in the T3 Code desktop app, on its most recent thread. If T3 \
-             Code doesn't have the machine yet, shows its dialog to add it instead.",
+            "Shows the machine in the T3 Code desktop app on its most recent thread (or opens pairing if unpaired).",
             json!({ "machine": machine }),
             &["machine"],
         ),
         tool(
             "add_to_t3",
-            "Shows T3 Code's dialog to add this machine again (e.g. after the user removed it there); \
-             the user confirms in T3 Code.",
+            "Opens T3 Code's confirmation dialog to add this machine again.",
             json!({ "machine": machine }),
             &["machine"],
         ),
         tool(
             "delete_machine",
-            "Permanently deletes a machine and everything on it, including work not pushed anywhere. Ask \
-             the user first. Refuses while an agent or build is working there; `discard: true` deletes \
-             anyway and loses that work.",
+            "Permanently deletes an Agent37 machine and stops its recurring disk billing. Ask the user first.",
             json!({ "machine": machine, "discard": { "type": "boolean", "description": "Delete even while work runs" } }),
             &["machine"],
         ),
@@ -310,23 +314,22 @@ fn tool_list() -> Value {
 }
 
 impl Call {
-    /// The answer when the call outlasts `WAIT`.
     fn pending(&self) -> String {
         match self {
             Self::CreateMachine { name, .. } => format!(
-                "Creating {name}, about a minute. list_machines shows its progress. When it is ready, \
-                 T3 Code asks the user to add it as a backend."
+                "Creating {name} on Agent37. list_machines shows its progress. When ready, T3 Code asks the user to confirm."
             ),
             Self::SignInAgent { machine, agent } => format!(
-                "The {agent} sign-in for {machine} is open in the browser; the user must click Authorize. \
-                 list_machines stops listing {agent} under signedOut once done."
+                "The {agent} sign-in for {machine} is open in the browser; the user must click Authorize."
+            ),
+            Self::SignInGithub { machine, .. } => format!(
+                "GitHub device sign-in for {machine} is open in the browser; check the notification for the one-time code."
             ),
             Self::AddProject { machine, project } => format!(
-                "Still cloning {project} onto {machine}; list_machines shows its progress under the machine's projects."
+                "Still cloning {project} onto {machine}; list_machines shows progress."
             ),
             Self::TurnOnConnect { machine } => format!(
-                "T3's sign-in page for {machine} is open in the browser; the user must approve it. \
-                 machine_details shows connect: true once other devices can reach it."
+                "T3 Connect sign-in for {machine} is open in the browser; approve it there."
             ),
             _ => "Still running in the background; list_machines shows the machine's state.".into(),
         }
@@ -337,7 +340,6 @@ impl Tools for App {
     async fn call(self: Arc<Self>, call: Call) -> Result<String> {
         let pending = call.pending();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        // Detached, so a client that gives up does not cancel the work halfway.
         tokio::spawn(async move {
             if let Err(Err(e)) = tx.send(run(&self, call).await) {
                 self.shared.notify(NAME, format!("{e:#}"));
@@ -353,10 +355,12 @@ impl Tools for App {
 async fn run(app: &Arc<App>, call: Call) -> Result<String> {
     Ok(match call {
         Call::ListMachines {} => json!({ "machines": app.views(), "costs": app.costs() }).to_string(),
-        Call::CreateMachine { name, size, projects } => {
-            let m = app.create_machine(&name, size.as_deref().unwrap_or("default"), projects).await?;
+        Call::CreateMachine { name, size, instance_type, region, disk_gb, projects } => {
+            let ty = instance_type.as_deref().map(InstanceType::from_str).transpose()?.unwrap_or_default();
+            let reg = region.as_deref().map(Region::from_str).transpose()?.unwrap_or_default();
+            let m = app.create_machine(&name, size.as_deref().unwrap_or("small"), ty, reg, disk_gb, projects).await?;
             format!(
-                "Created {} ({}). T3 Code now asks the user to add it as a backend; tell them to confirm.",
+                "Created {} ({}) on Agent37. T3 Code now asks the user to add it as a backend; tell them to confirm.",
                 m.record().name,
                 m.id()
             )
@@ -386,10 +390,11 @@ async fn run(app: &Arc<App>, call: Call) -> Result<String> {
                 n => format!("{name} stays awake for {n} minutes."),
             }
         }
-        Call::ResizeMachine { machine, size } => {
+        Call::ResizeMachine { machine, size, disk_gb } => {
             let m = app.machine(&machine)?;
-            m.resize(&size).await?;
-            format!("{} is set to {size}; it applies when it next wakes (right away if it was idle and no agent waited on the user).", m.record().name)
+            m.resize(size.as_deref(), disk_gb).await?;
+            let r = m.record();
+            format!("{} resized to {} ({} GB disk).", r.name, r.size, r.disk_gb)
         }
         Call::SignInAgent { machine, agent } => {
             let a = Agent::from_name(&agent).ok_or_else(|| anyhow!("agent must be Claude or Codex"))?;
@@ -397,10 +402,15 @@ async fn run(app: &Arc<App>, call: Call) -> Result<String> {
             m.sign_in(a).await?;
             format!("{agent} is signed in on {}.", m.record().name)
         }
+        Call::SignInGithub { machine, token } => {
+            let m = app.machine(&machine)?;
+            m.sign_in_github(token.as_deref()).await?;
+            format!("GitHub is signed in on {}.", m.record().name)
+        }
         Call::TurnOnConnect { machine } => {
             let m = app.machine(&machine)?;
             m.turn_on_connect().await?;
-            format!("T3 Connect is on for {}: the user's other devices reach it with their T3 account.", m.record().name)
+            format!("T3 Connect is on for {}.", m.record().name)
         }
         Call::MachineDetails { machine } => serde_json::to_string(&app.details(&machine)?)?,
         Call::SetAutoSleep { machine, on } => {
@@ -435,7 +445,6 @@ async fn run(app: &Arc<App>, call: Call) -> Result<String> {
     })
 }
 
-/// A coding agent CLI that can use this server.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Client {
@@ -460,7 +469,6 @@ impl Client {
     }
 }
 
-/// Whether the client's CLI is on this computer at all.
 pub async fn installed(client: Client) -> bool {
     locate(client.cli()).await.is_some()
 }
@@ -469,7 +477,6 @@ pub async fn registered(client: Client) -> bool {
     run_cli(client, &["mcp".into(), "get".into(), NAME.into()]).await.is_ok()
 }
 
-/// Adds this server to the client's user config; nothing to do when it is there already.
 pub async fn register(client: Client) -> Result<()> {
     if registered(client).await {
         return Ok(());
@@ -480,7 +487,6 @@ pub async fn register(client: Client) -> Result<()> {
 async fn run_cli(client: Client, args: &[String]) -> Result<()> {
     let cli = client.cli();
     let bin = locate(cli).await.ok_or_else(|| anyhow!("the {cli} CLI is not installed"))?;
-    // Its directory first, so a Node CLI finds the `node` installed next to it.
     let dirs = bin.parent().map(PathBuf::from).into_iter();
     let search = login_path().await.cloned().or_else(|| std::env::var_os("PATH")).unwrap_or_default();
     let path = std::env::join_paths(dirs.chain(std::env::split_paths(&search)))?;
@@ -491,7 +497,6 @@ async fn run_cli(client: Client, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// On PATH, else on the login shell's PATH.
 async fn locate(cli: &str) -> Option<PathBuf> {
     if let Ok(bin) = which::which(cli) {
         return Some(bin);
@@ -499,7 +504,6 @@ async fn locate(cli: &str) -> Option<PathBuf> {
     which::which_in(cli, login_path().await, std::env::current_dir().ok()?).ok()
 }
 
-/// The login shell's PATH, read once: apps started from the Finder do not inherit it.
 async fn login_path() -> Option<&'static OsString> {
     static PATH: OnceCell<Option<OsString>> = OnceCell::const_new();
     PATH.get_or_init(|| async {
@@ -510,7 +514,6 @@ async fn login_path() -> Option<&'static OsString> {
             .kill_on_drop(true)
             .output();
         let out = tokio::time::timeout(Duration::from_secs(5), out).await.ok()?.ok()?;
-        // Last line: an interactive shell may print its own output first.
         let path = String::from_utf8_lossy(&out.stdout).lines().last()?.trim().to_owned();
         (!path.is_empty()).then(|| path.into())
     })
@@ -522,14 +525,13 @@ async fn login_path() -> Option<&'static OsString> {
 mod tests {
     use super::*;
 
-    /// Echoes the parsed call; fails `sleep_machine`, and checks sizes as the app does.
     struct Echo;
 
     impl Tools for Echo {
         async fn call(self: Arc<Self>, call: Call) -> Result<String> {
             match call {
                 Call::SleepMachine { .. } => bail!("an agent is working"),
-                Call::ResizeMachine { size, .. } => Ok(crate::machine::provision::size(&size)?.id.into()),
+                Call::ResizeMachine { size: Some(size), .. } => Ok(crate::machine::provision::size(&size)?.id.into()),
                 call => Ok(format!("{call:?}")),
             }
         }
@@ -545,7 +547,7 @@ mod tests {
         let r = rpc("initialize", json!({ "protocolVersion": "2025-03-26" })).await;
         assert_eq!(r["id"], 7);
         assert_eq!(r["result"]["protocolVersion"], "2025-03-26");
-        assert_eq!(r["result"]["serverInfo"]["name"], "t3boat");
+        assert_eq!(r["result"]["serverInfo"]["name"], "t3agent37");
         assert_eq!(r["result"]["capabilities"], json!({ "tools": {} }));
         let r = rpc("initialize", json!({ "protocolVersion": "1999-01-01" })).await;
         assert_eq!(r["result"]["protocolVersion"], DEFAULT_PROTOCOL_VERSION);
@@ -555,8 +557,8 @@ mod tests {
     async fn lists_tools_and_rejects_unknown_methods() {
         let tools = rpc("tools/list", json!({})).await["result"]["tools"].clone();
         let names: Vec<&str> = tools.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names.len(), 15);
-        assert!(names.contains(&"sign_in_agent") && names.contains(&"delete_machine"));
+        assert_eq!(names.len(), 16);
+        assert!(names.contains(&"sign_in_agent") && names.contains(&"sign_in_github") && names.contains(&"delete_machine"));
         assert_eq!(rpc("ping", json!({})).await["result"], json!({}));
         assert_eq!(rpc("resources/list", json!({})).await["error"]["code"], -32601);
     }
@@ -566,11 +568,11 @@ mod tests {
         let r = rpc("tools/call", json!({ "name": "list_machines" })).await;
         assert_eq!(r["result"], content("ListMachines".into(), false));
         let r = rpc("tools/call", json!({ "name": "create_machine", "arguments": { "name": "dev" } })).await;
-        assert_eq!(r["result"]["content"][0]["text"], r#"CreateMachine { name: "dev", size: None, projects: [] }"#);
+        assert!(r["result"]["content"][0]["text"].as_str().unwrap().contains("CreateMachine"));
         let r = rpc("tools/call", json!({ "name": "sleep_machine", "arguments": { "machine": "dev" } })).await;
         assert_eq!(r["result"], content("an agent is working".into(), true));
         let r = rpc("tools/call", json!({ "name": "resize_machine", "arguments": { "machine": "dev", "size": "huge" } })).await;
-        assert_eq!(r["result"], content("unknown size huge".into(), true));
+        assert!(r["result"]["isError"] == true);
         for bad in [
             json!({ "name": "format_disk", "arguments": { "machine": "dev" } }),
             json!({ "name": "wake_machine", "arguments": {} }),

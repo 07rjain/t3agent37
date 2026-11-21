@@ -367,8 +367,11 @@ async fn relay(m: &MachineRuntime, parts: Parts, body: Body, route: Relay) -> Re
         let url = format!("{}{}", m.upstream_url(), route.target);
         let mut rb = m.shared.http.request(parts.method.clone(), url).body(body.clone());
         for (k, v) in &parts.headers {
-            // The credential is the route's, and the body's length is what is sent here.
-            let replaced = k == header::AUTHORIZATION || k == header::CONTENT_LENGTH;
+            // The credential is the route's, the edge key is injected below, and the body's
+            // length is what is sent here.
+            let replaced = k == header::AUTHORIZATION
+                || k == header::CONTENT_LENGTH
+                || k.as_str().eq_ignore_ascii_case(crate::agent37::HEADER_API_KEY);
             if !replaced && !HOP_BY_HOP.contains(&k.as_str()) {
                 rb = rb.header(k, v);
             }
@@ -376,12 +379,14 @@ async fn relay(m: &MachineRuntime, parts: Parts, body: Body, route: Relay) -> Re
         if let Some(authorization) = &route.authorization {
             rb = rb.header(header::AUTHORIZATION, authorization);
         }
+        if let Ok((k, v)) = m.shared.agent37.edge_key_header() {
+            rb = rb.header(k, v);
+        }
         rb.send()
     };
     let first = send().await;
-    // Maybe never reached the machine: Boat answers for a sandbox that does not run itself (a
-    // redirect to its fallback page, a gateway error). If it fell asleep since the last poll,
-    // wake it and send once more.
+    // Maybe never reached the machine: Agent37 answers with a 502/503 or redirect when a
+    // sleeping/stopped port isn't up yet. If it fell asleep since the last poll, wake and retry.
     let unreached = match &first {
         Ok(r) => {
             let s = r.status();

@@ -57,7 +57,7 @@ pub(super) async fn socket(m: Arc<MachineRuntime>, upgrade: WebSocketUpgrade, pa
     {
         return res;
     }
-    match upstream::connect(&m.upstream_url(), &m.upstream_token(), &target).await {
+    match upstream::connect_with_headers(&m.upstream_url(), &m.upstream_token(), &target, &m.edge_headers()).await {
         Ok(up) => upgrade.on_upgrade(move |down| pump(m, down, up)),
         // The machine's own refusal (no device hub, say) reaches T3 Code as it was.
         Err(e) => match e.downcast_ref() {

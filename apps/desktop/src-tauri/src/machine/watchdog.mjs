@@ -1,52 +1,58 @@
-// t3boat watchdog. Runs on the Boat sandbox next to the T3 server and stops the sandbox once no
-// agent works and nobody used it for `sleepAfterSecs`. It lives here, not on the laptop, so
-// machines finish their work and then sleep even when the laptop is closed.
+// t3agent37 watchdog. Runs on the Agent37 sandbox next to the T3 server and tracks when no agent
+// works and nobody used it for `sleepAfterSecs`.
 //
-// To sleep it "drains": it publishes a manifest of the final orchestration state so the laptop
-// proxy can keep answering T3 Code truthfully while the machine sleeps. The proxy captures it
-// and acks, and the watchdog stops on its next tick, after its usual checks.
-//
-// The disk is saved as a Boat snapshot at every sleep: Boat deletes a stopped sandbox's disk
-// after 14 days, the saved snapshot stays, and t3boat restores the machine from it. An ack hands
-// the save to the laptop app, which makes it from the stopped sandbox and bills nothing. Without
-// one by the end of a grace period (laptop gone, its capture failed) the watchdog saves it
-// first, awake, then stops on a later tick. Only one save of its own runs at a time, and none
-// stops the machine while it runs: one called off by use runs on, and could finish after the app's.
+// Strictly read-only: this sandbox NEVER holds an Agent37 API key and NEVER stops itself.
+// To sleep it "drains": it publishes a manifest of the final orchestration state so the local
+// t3agent37 proxy can capture it and keep answering T3 Code truthfully while the machine sleeps.
+// Once the proxy captures that state and calls POST /sleep-ack, the watchdog transitions to
+// `phase = "readyToSleep"` (`readyToSleep: true`), and the proxy itself calls Agent37's sleep API.
+// If any activity, busy work, or new orchestration events occur while draining or readyToSleep,
+// it immediately reverts to `phase = "active"` (`readyToSleep: false`, `manifest: null`) so the
+// proxy knows NOT to sleep the instance.
 
 import { createServer } from "node:http";
-import { readFileSync, writeFileSync } from "node:fs";
-import { execFile } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, readFileSync, statfsSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { availableParallelism, homedir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const HOME = homedir();
-const CONFIG_PATH = join(HOME, ".t3boat", "config.json");
-// On disk, so it survives watchdog restarts (upgrades); a stop ends it (see BOOT_ID).
-const KEEP_AWAKE_PATH = join(HOME, ".t3boat", "keep-awake-until");
+const STATE_DIR = join(HOME, ".t3agent37");
+const CONFIG_PATH = join(STATE_DIR, "config.json");
+// On disk, so it survives watchdog restarts (upgrades); a sleep/resume ends it (see BOOT_ID and tick).
+const KEEP_AWAKE_PATH = join(STATE_DIR, "keep-awake-until");
 const MAX_KEEP_AWAKE_MINUTES = 24 * 60;
 const DB_PATH = join(HOME, ".t3", "userdata", "statev2.sqlite");
-const T3_ORIGIN = "http://127.0.0.1:3773";
-const PORT = 3774;
+const T3_ORIGIN = process.env.T3_ORIGIN || "http://127.0.0.1:3773";
+const HOST = process.env.WATCHDOG_HOST || process.env.T3AGENT37_BIND_HOST || "0.0.0.0";
+const PORT = Number(process.env.WATCHDOG_PORT) || 3774;
 const TICK_MS = 5_000;
-// The app's ack can take a poll, a capture of up to 12 s and the post. A miss costs a ~2 min save
-// while awake.
-const DRAIN_GRACE_MS = 45_000;
-// A tick that arrives this late means the VM was frozen: a warm resume after a stop.
+// A tick that arrives this late means the instance was frozen: a warm resume after a sleep.
 const RESUMED_GAP_MS = 30_000;
-// Still running this long after asking Boat to stop: the stop failed or a fast resume undid it.
-const STOP_SETTLE_MS = 90_000;
-// A save makes a fresh capture of the disk: about 2 min on a new small machine, more with a
-// fuller disk. One that hangs must not keep the machine up.
-const SNAPSHOT_TIMEOUT_MS = 10 * 60_000;
 
-const config = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
-const log = (...args) => console.log(new Date().toISOString(), ...args);
+function loadConfig() {
+  return JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
+}
+
+let config = { secret: "", t3Token: "", sleepAfterSecs: 180 };
+const log = (...args) => console.log(new Date().toISOString(), "[watchdog]", ...args);
+
+export function reloadConfig() {
+  try {
+    config = loadConfig();
+    log(`config reloaded, sleep after ${config.sleepAfterSecs}s`);
+    if (!started) start();
+  } catch (e) {
+    log("config reload failed", e.message);
+  }
+}
 
 /**
- * draining: the manifest is published, waiting for the app's ack or the grace period. saving: this
- * watchdog saves the snapshot after an unacked drain, manifest still published.
- * @type {"active" | "draining" | "saving" | "stopping"}
+ * draining: the manifest is published, waiting for the proxy to capture state and ack.
+ * readyToSleep: the proxy acked the manifest and everything is still idle; the proxy may sleep it.
+ * @type {"active" | "draining" | "readyToSleep"}
  */
 let phase = "active";
 /** Last time anything held the machine up, CPU load included: the idle countdown starts here. */
@@ -59,16 +65,16 @@ let working = { threads: 0, subagents: 0, waiting: 0 };
 // broken server cannot keep the machine billing.
 const UNKNOWN_BUSY_MS = 30 * 60_000;
 let unknownSince = 0;
-// T3 boots after this watchdog: until it first answers it is starting, not failing, and no agent
-// can be mid-turn on it.
+// T3 boots alongside this watchdog: until it first answers it is starting, not failing, and no
+// agent can be mid-turn on it.
 let t3Answered = false;
 const unknownBusy = () => unknownSince > 0 && Date.now() - unknownSince < UNKNOWN_BUSY_MS;
 const agentsWorking = () => working.threads + working.subagents > 0;
 const agentsBusy = () => agentsWorking() || unknownBusy();
 
 /**
- * One busy check for the tick, "Sleep now" and the delete guard. A failure starts (or continues)
- * "can't tell".
+ * One busy check for the tick, "Sleep now", sleep-ack and the delete guard. A failure starts
+ * (or continues) "can't tell".
  */
 async function refreshWorking() {
   try {
@@ -81,6 +87,7 @@ async function refreshWorking() {
     log(e.message);
   }
 }
+
 // A build or job started outside an agent turn (in the background, in a terminal) shows as CPU
 // use; an idle dev server does not. Counted in cores, so a single-threaded build counts on any
 // size, and smoothed over ~30s so a short spike doesn't count. It holds the machine up for at most
@@ -99,10 +106,14 @@ const isBusy = () => agentsBusy() || cpuBusy();
 
 /** Busy and total jiffies across all cores since boot, from /proc/stat. */
 function readCpu() {
-  const fields = readFileSync("/proc/stat", "utf8").split("\n")[0].trim().split(/\s+/).slice(1).map(Number);
-  const idle = fields[3] + (fields[4] ?? 0);
-  const total = fields.reduce((a, b) => a + b, 0);
-  return { busy: total - idle, total };
+  try {
+    const fields = readFileSync("/proc/stat", "utf8").split("\n")[0].trim().split(/\s+/).slice(1).map(Number);
+    const idle = fields[3] + (fields[4] ?? 0);
+    const total = fields.reduce((a, b) => a + b, 0);
+    return { busy: total - idle, total };
+  } catch {
+    return { busy: 0, total: 0 };
+  }
 }
 
 function sampleCpu() {
@@ -112,21 +123,54 @@ function sampleCpu() {
   cpuPrev = now;
   cpuLoad = cpuLoad * 0.8 + usage * 0.2;
 }
+
+/** Disk usage telemetry for HOME (cached for 30s to keep idle CPU low). */
+const DISK_POLL_MS = 30_000;
+let cachedDisk = null;
+let cachedDiskAt = 0;
+
+function readDisk() {
+  const now = Date.now();
+  if (cachedDisk !== null && now - cachedDiskAt < DISK_POLL_MS) {
+    return cachedDisk;
+  }
+  let next = null;
+  try {
+    const stat = statfsSync(HOME);
+    const blockSize = stat.frsize || stat.bsize;
+    const totalBytes = stat.blocks * blockSize;
+    const freeBytes = stat.bavail * blockSize;
+    const usedBytes = Math.max(0, (stat.blocks - stat.bfree) * blockSize);
+    const usableBytes = usedBytes + freeBytes;
+    const usedPercent = usableBytes > 0 ? Math.round((usedBytes / usableBytes) * 1000) / 10 : 0;
+    next = { usedBytes, totalBytes, freeBytes, usedPercent };
+  } catch {
+    try {
+      const out = execFileSync("df", ["-kP", HOME], { encoding: "utf8", timeout: 3_000 });
+      const lines = out.trim().split("\n");
+      const cols = lines[lines.length - 1]?.trim().split(/\s+/) ?? [];
+      const totalBytes = Number(cols[1]) * 1024;
+      const usedBytes = Number(cols[2]) * 1024;
+      const freeBytes = Number(cols[3]) * 1024;
+      if (Number.isFinite(totalBytes) && Number.isFinite(usedBytes) && Number.isFinite(freeBytes)) {
+        const usableBytes = usedBytes + freeBytes;
+        const usedPercent = usableBytes > 0 ? Math.round((usedBytes / usableBytes) * 1000) / 10 : 0;
+        next = { usedBytes, totalBytes, freeBytes, usedPercent };
+      }
+    } catch {
+      next = null;
+    }
+  }
+  cachedDisk = next;
+  cachedDiskAt = now;
+  return next;
+}
+
 let manifest = null;
-let drainStartedAt = 0;
-/**
- * This sleep's snapshot is seen to: the laptop app acked the drain (it saves the snapshot once
- * the machine has stopped), or this watchdog saved it. The next tick that finds the machine idle
- * stops it. Only hold() clears it.
- */
-let snapshotCovered = false;
-/** A `boat snapshot self` this watchdog started still runs, whether or not its sleep was called off. */
-let saveRunning = false;
 let lastTickAt = Date.now();
-let stopRequestedAt = 0;
 /** "Keep awake": no sleeping before this (ms since epoch), working or not; Infinity = until stopped. */
 // A stop ends any hold: after a cold resume (new boot) the stored one is void. A warm resume
-// keeps the boot, so the resume check in tick() ends it there.
+// keeps the boot, so the resume check in tick() and POST /activity { resumed: true } end it there.
 const BOOT_ID = readFileSafe("/proc/sys/kernel/random/boot_id").trim();
 const [storedUntil, storedBoot] = readFileSafe(KEEP_AWAKE_PATH).split(" ");
 let keepAwakeUntil = storedBoot === BOOT_ID ? Number(storedUntil) || 0 : 0;
@@ -143,7 +187,8 @@ function readFileSafe(path) {
 /** null: until stopped; 0: off. */
 function setKeepAwake(minutes) {
   keepAwakeUntil = minutes === null ? Infinity : minutes > 0 ? Date.now() + minutes * 60_000 : 0;
-  writeFileSync(KEEP_AWAKE_PATH, `${keepAwakeUntil} ${BOOT_ID}`);
+  mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+  writeFileSync(KEEP_AWAKE_PATH, `${keepAwakeUntil} ${BOOT_ID}`, { mode: 0o600 });
 }
 
 // Work T3 starts on its own at a set time: an automation, a webhook run it held back, an agent
@@ -152,12 +197,12 @@ function setKeepAwake(minutes) {
 // time stays behind in T3's rows after it ran.
 const DUE_SOON_MS = 5 * 60_000;
 const OVERDUE_MS = 2 * 60_000;
-/** When T3 next starts work on its own, ms since epoch; null for never. t3boat wakes the machine for it. */
+/** When T3 next starts work on its own, ms since epoch; null for never. The proxy wakes the machine for it. */
 let nextDueAt = null;
 const dueSoon = () => nextDueAt !== null && nextDueAt - Date.now() < DUE_SOON_MS;
 
-// Events only a person causes, from any client: T3 Code through t3boat, but also a phone or
-// another computer through T3 Connect, which t3boat never sees.
+// Events only a person causes, from any client: T3 Code through the proxy, but also a phone or
+// another computer through T3 Connect, which the proxy never sees.
 const PERSON_EVENTS = [
   "thread.created",
   "thread.visit-recorded",
@@ -382,24 +427,6 @@ function readManifest() {
   }
 }
 
-/**
- * Saves the snapshot awake after an unacked drain, then drains on with it seen to: the next tick
- * that finds the machine idle stops it. Any use meanwhile calls the sleep off; the save runs on
- * and covers nothing. The drain's manifest stays: events since it call the stop off too.
- */
-async function save() {
-  phase = "saving";
-  saveRunning = true;
-  log("saving snapshot", config.snapshot);
-  // A machine that cannot save still sleeps: it must not bill on, and Boat keeps its disk 14 days.
-  await boat(["snapshot", "self", config.snapshot], SNAPSHOT_TIMEOUT_MS).catch((e) => log("snapshot failed", e.message));
-  saveRunning = false;
-  // Called off: it covers nothing. Still saving, it is this sleep's own: none starts beside one.
-  if (phase !== "saving") return;
-  snapshotCovered = true;
-  phase = "draining";
-}
-
 /** Publishes the manifest. Only right after a fresh check found no agent working. */
 function drain() {
   try {
@@ -409,8 +436,7 @@ function drain() {
     manifest = null;
   }
   phase = "draining";
-  drainStartedAt = Date.now();
-  log("draining", manifest?.sequence);
+  log("draining", manifest?.sequence ?? null);
 }
 
 /** Someone uses the machine: it stays up, and CPU load may hold it up again. */
@@ -426,41 +452,26 @@ function hold(reason) {
   if (phase !== "active") log(`back to active: ${reason}`);
   phase = "active";
   manifest = null;
-  snapshotCovered = false;
 }
 
-/** Runs the Boat CLI, in a login shell for its PATH. */
-function boat(args, timeout) {
-  return new Promise((resolve, reject) => {
-    execFile("bash", ["-lc", 'boat "$@" --json', "boat", ...args], { timeout }, (err, stdout, stderr) =>
-      err ? reject(new Error(stderr.trim() || stdout.trim() || err.message)) : resolve(stdout),
-    );
-  });
-}
-
-function stopSelf() {
-  phase = "stopping";
-  stopRequestedAt = Date.now();
-  log("stopping sandbox");
-  boat(["stop", "self"]).catch((e) => {
-    log("boat stop failed", e.message);
-    touch("stop failed");
-  });
+/** Anything happened since the manifest: someone uses the machine after all. */
+function newEvents() {
+  let current = null;
+  try {
+    current = readManifest();
+  } catch {}
+  if (current === null) return false;
+  if (manifest === null) return current.sequence > 0;
+  return current.sequence !== manifest.sequence;
 }
 
 async function tick() {
   const now = Date.now();
-  // A drain begun during this tick's checks (by "Sleep now") waits for the next tick's.
-  const drainBefore = drainStartedAt;
   if (now - lastTickAt > RESUMED_GAP_MS) {
     setKeepAwake(0);
     touch("resumed");
   }
   lastTickAt = now;
-  if (phase === "stopping") {
-    if (now - stopRequestedAt > STOP_SETTLE_MS) touch("still running after stop");
-    return;
-  }
 
   sampleCpu();
   await refreshWorking();
@@ -475,42 +486,26 @@ async function tick() {
   if (keptAwake()) return touch("kept awake");
   if (cpuBusy()) return hold("cpu busy");
   if (dueSoon()) return hold("work due");
-  // Can't tell: don't sleep, but it isn't activity either, so flaky checks can't hold it up forever.
-  if (unknownBusy()) return;
+  // Can't tell: don't sleep (revert draining/readyToSleep), but do not reset lastActivityAt so
+  // flaky checks cannot hold the machine up past UNKNOWN_BUSY_MS.
+  if (unknownBusy()) {
+    if (phase !== "active") {
+      log("back to active: agents unknown");
+      phase = "active";
+      manifest = null;
+    }
+    return;
+  }
+  if (phase !== "active" && newEvents()) return touch("new events");
 
   const idleMs = now - lastActivityAt;
   if (phase === "active" && idleMs >= config.sleepAfterSecs * 1000) drain();
-  // Only here, past every check above, does a drain end in a stop. Not while a save of its own
-  // runs: one called off could finish after the app's.
-  else if (
-    phase === "draining" &&
-    drainStartedAt === drainBefore &&
-    !saveRunning &&
-    (snapshotCovered || now - drainStartedAt >= DRAIN_GRACE_MS)
-  )
-    finishDrain();
-}
-
-/** Anything happened since the manifest: someone uses the machine after all. */
-function newEvents() {
-  let current = null;
-  try {
-    current = readManifest();
-  } catch {}
-  return manifest !== null && current !== null && current.sequence !== manifest.sequence;
-}
-
-/** Stops once the snapshot is seen to, else saves it first. */
-function finishDrain() {
-  if (newEvents()) return touch("new events");
-  if (snapshotCovered) stopSelf();
-  // Not awaited: ticks go on during a save, so an agent starting to work calls it off.
-  else save();
 }
 
 function status() {
   return {
     phase,
+    readyToSleep: phase === "readyToSleep",
     busy: isBusy(),
     cpuBusy: !agentsBusy() && cpuBusy(),
     agentsUnknown: unknownBusy(),
@@ -520,13 +515,14 @@ function status() {
     waitingThreads: working.waiting,
     keepAwakeForever: keepAwakeUntil === Infinity,
     keepAwakeSecs: Number.isFinite(keepAwakeUntil) ? Math.max(0, Math.ceil((keepAwakeUntil - Date.now()) / 1000)) : 0,
-    idleSecs: Math.floor((Date.now() - lastActivityAt) / 1000),
+    idleSecs: Math.max(0, Math.floor((Date.now() - lastActivityAt) / 1000)),
     sleepAfterSecs: config.sleepAfterSecs,
     nextDueAt,
     workDue: dueSoon(),
-    // While stopping, it names the sequence the machine stops at: the proxy trusts its
-    // capture only when they match.
+    // While draining or readyToSleep, it names the sequence the machine sleeps at: the proxy
+    // trusts its capture only when they match.
     manifest: phase === "active" ? null : manifest,
+    disk: readDisk(),
   };
 }
 
@@ -549,57 +545,106 @@ const server = createServer(async (req, res) => {
   };
   if (req.headers.authorization !== `Bearer ${config.secret}`) return reply(401, { error: "unauthorized" });
   try {
-    if (req.method === "GET" && req.url === "/status") return reply(200, status());
-    if (req.method === "GET" && req.url === "/status?fresh") {
-      // The delete guard: agents as of now, not as of the last tick.
-      await refreshWorking();
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    const path = url.pathname;
+    const fresh = url.searchParams.has("fresh");
+
+    if (req.method === "GET" && (path === "/status" || path === "/t3boat-status")) {
+      if (fresh) {
+        // The delete guard and wake check: agents as of now, not as of the last tick.
+        await refreshWorking();
+      }
       return reply(200, status());
     }
-    if (req.method === "POST" && req.url === "/activity") {
-      // { resumed }: the proxy just resumed the sandbox, so the stop asked for here is over. A
-      // tick only notices a freeze of RESUMED_GAP_MS or more.
+    if (req.method === "POST" && path === "/activity") {
+      // { resumed }: the proxy just resumed the sandbox, so end any prior keep-awake and return to active.
       const { resumed } = JSON.parse((await readBody(req)) || "{}");
       if (resumed) {
         setKeepAwake(0);
         touch("resumed");
         return reply(200, status());
       }
-      // Too late to call off a stop: the proxy waits for it and resumes the machine.
-      if (phase === "stopping") return reply(409, { error: "stopping", ...status() });
       touch("user activity");
       return reply(200, status());
     }
-    if (req.method === "POST" && req.url === "/drain") {
-      // "Sleep now" from the tray. Never mid-turn; it does end a keep-awake. Drains on this fresh
-      // check; the tick decides the stop as usual.
+    if (req.method === "POST" && path === "/drain") {
+      // "Sleep now" from the tray. Never mid-turn; it does end a keep-awake.
       await refreshWorking();
       // A busy CPU alone doesn't refuse: "Sleep now" is the user's explicit call.
       if (agentsBusy()) {
         const error = agentsWorking() ? "an agent is working" : "could not check agents";
         return reply(409, { error, ...status() });
       }
+      try {
+        readT3State();
+      } catch {}
+      if (dueSoon()) {
+        return reply(409, { error: "scheduled work is due soon", ...status() });
+      }
       setKeepAwake(0);
       if (phase === "active") drain();
       sleepRequested = true;
       return reply(200, status());
     }
-    if (req.method === "POST" && req.url === "/keep-awake") {
+    if (req.method === "POST" && path === "/keep-awake") {
       // { minutes }: null = until stopped, 0 ends it. Counted on this machine's clock, never the laptop's.
       const { minutes } = JSON.parse((await readBody(req)) || "{}");
-      // Too late during a stop (checked after the body: a stop can begin meanwhile): the proxy
-      // waits for it, resumes the machine and asks again.
-      if (phase === "stopping") return reply(409, { error: "stopping", ...status() });
       const valid = minutes === null || (Number.isInteger(minutes) && minutes >= 0 && minutes <= MAX_KEEP_AWAKE_MINUTES);
       if (!valid) return reply(400, { error: "minutes must be null (until stopped) or 0 to " + MAX_KEEP_AWAKE_MINUTES });
       setKeepAwake(minutes);
       if (minutes !== 0) touch("keep awake");
       return reply(200, status());
     }
-    if (req.method === "POST" && req.url === "/sleep-ack") {
-      // The proxy captured this state and saves the snapshot once stopped: no need to wait out
-      // the grace period. The next tick decides the stop, after its usual checks.
+    if (req.method === "POST" && path === "/sleep-ack") {
+      // The proxy captured this state and wants confirmation to sleep the instance via Agent37 API.
+      // Re-verify nothing started working or changed since the manifest before marking readyToSleep.
       const { sequence } = JSON.parse((await readBody(req)) || "{}");
-      if (phase === "draining" && manifest && sequence === manifest.sequence) snapshotCovered = true;
+      await refreshWorking();
+      let personActed = false;
+      try {
+        personActed = readT3State();
+      } catch (e) {
+        log("T3 state unavailable", e.message);
+      }
+      if (agentsWorking()) {
+        touch("agent working");
+        return reply(200, status());
+      }
+      if (personActed) {
+        touch("used in T3");
+        return reply(200, status());
+      }
+      if (keptAwake()) {
+        touch("kept awake");
+        return reply(200, status());
+      }
+      if (cpuBusy()) {
+        hold("cpu busy");
+        return reply(200, status());
+      }
+      if (dueSoon()) {
+        hold("work due");
+        return reply(200, status());
+      }
+      if (unknownBusy()) {
+        if (phase !== "active") {
+          log("back to active: agents unknown");
+          phase = "active";
+          manifest = null;
+        }
+        return reply(200, status());
+      }
+      if (phase !== "active" && newEvents()) {
+        touch("new events");
+        return reply(200, status());
+      }
+      if (phase === "draining" || phase === "readyToSleep") {
+        const matches = manifest !== null ? sequence === manifest.sequence : sequence == null;
+        if (matches) {
+          if (phase !== "readyToSleep") log("ready to sleep", manifest?.sequence ?? null);
+          phase = "readyToSleep";
+        }
+      }
       return reply(200, status());
     }
     reply(404, { error: "not found" });
@@ -608,10 +653,64 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, "127.0.0.1", () => log(`watchdog on ${PORT}, sleep after ${config.sleepAfterSecs}s`));
-// One tick at a time: a slow T3 check must never finish after a newer tick started a stop.
+let loopTimer = null;
+let listenRetryTimer = null;
+let stopped = false;
+let started = false;
+
+server.on("error", (err) => {
+  log(`watchdog HTTP error (${err.code || err.message}); retrying listen in 2s`);
+  if (stopped || listenRetryTimer) return;
+  listenRetryTimer = setTimeout(() => {
+    listenRetryTimer = null;
+    if (!stopped && !server.listening) {
+      server.listen(PORT, HOST);
+    }
+  }, 2_000);
+});
+
+// One tick at a time: a slow T3 check must never overlap a newer tick.
 async function loop() {
+  if (stopped) return;
   await tick().catch((e) => log("tick failed", e.message));
-  setTimeout(loop, TICK_MS);
+  if (!stopped) loopTimer = setTimeout(loop, TICK_MS);
 }
-loop();
+
+export function start() {
+  if (started) return;
+  config = loadConfig();
+  started = true;
+  stopped = false;
+  server.listen(PORT, HOST, () => log(`watchdog on ${HOST}:${PORT}, sleep after ${config.sleepAfterSecs}s`));
+  loop();
+}
+
+export function stop() {
+  if (stopped) return Promise.resolve();
+  stopped = true;
+  if (loopTimer) {
+    clearTimeout(loopTimer);
+    loopTimer = null;
+  }
+  if (listenRetryTimer) {
+    clearTimeout(listenRetryTimer);
+    listenRetryTimer = null;
+  }
+  return new Promise((resolve) => {
+    if (!started || !server.listening) return resolve();
+    server.close(() => resolve());
+    server.closeAllConnections?.();
+  });
+}
+
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isMain) {
+  start();
+  const exit = (signal) => {
+    log(`received ${signal}: exiting`);
+    stop().then(() => process.exit(0));
+    setTimeout(() => process.exit(0), 2_000).unref();
+  };
+  process.on("SIGTERM", () => exit("SIGTERM"));
+  process.on("SIGINT", () => exit("SIGINT"));
+}

@@ -1,71 +1,61 @@
-<a href="https://t3boat.paukraft.com">
-  <img src="apps/web/public/og.png" alt="t3boat: Run your T3 Code agents in the cloud, on Boat">
-</a>
+# t3agent37
 
-<p align="center">
-  <a href="https://t3boat.paukraft.com">Website</a> ·
-  <a href="#install">Install</a> ·
-  <a href="apps/desktop/docs/architecture.md">How it works</a>
-</p>
+Auto-sleeping [T3 Code](https://t3.codes) remote machines on [Agent37](https://www.agent37.com), forked from [paukraft/t3boat](https://github.com/paukraft/t3boat).
 
-t3boat creates cloud machines on your [Boat](https://boat.dev) account and adds them to [T3 Code](https://t3.codes). They sleep when idle, so you only pay for the minutes your agents run.
-
-Chat in T3 Code as usual. A message to a sleeping machine wakes it; running work finishes with your laptop closed.
+Create isolated cloud containers or VMs on your Agent37 wallet, pair them into T3 Code through an edge-authenticated localhost proxy, and let them CRIU-checkpoint to sleep when idle so compute billing drops to `$0/hr` (retaining persistent disk at `$0.09/GB/mo` until deleted).
 
 ## What you get
 
-- Create, resize and delete machines from the menu bar
-- Add projects the way T3 Code's "Add to another machine" does, `.env` files included
-- Sign Claude Code or Codex in on a machine with their own login
-- T3 Connect, to reach a machine from your phone or browser
-- Cost per machine, today and this month
-- An MCP server, so agents on your computer can manage machines
+- **Edge-authenticated localhost proxy** (`127.0.0.1:47731+`): injects `X-Agent37-Key` on upstream HTTPS/WebSocket calls while passing T3 Code's `Authorization: Bearer` untouched. Zero `public_ports` needed, and your `sk_live_...` API key never enters any sandbox.
+- **CRIU checkpoint sleep & wake-on-demand**: read-only in-box watchdog (`:3774`) monitors T3 runs, `statev2.sqlite`, CPU, and disk usage; the local proxy captures state and calls `POST /v1/instances/{id}/sleep`, waking via `POST /start` with automatic `409 try_again` backoff.
+- **Containers, VMs, and Performance tiers**: defaults to `default` containers (`2 vCPU / 4 GB / 12 GB` — ~$4.76/mo compute + `$1.08/mo` disk), with 1-click `vm` (2.5×, full kernel/Docker) and `performance` (4×) options across `us`, `eu`, and `ap-south`.
+- **Headless VPS daemon + Desktop menu-bar app**: run `t3agent37-daemon` on an always-on Linux VPS (zero GTK/WebKit dependencies) so machines sleep reliably even when your laptop is closed, or build the full Tauri desktop tray app.
+- **Projects, GitHub, Agent OAuth & T3 Connect**: clone local T3 projects with `.env` files, sign in to GitHub (`gh auth login --web` or scoped PAT), sign in Claude/Codex via Agent37's WebSocket SSH tunnel, and auto-link into T3 Code's Linked Environments.
+- **Local MCP server** (`http://127.0.0.1:47730/mcp`): lets local Claude Code or Codex agents create, wake, sleep, resize, and manage Agent37 machines.
 
-## What you need
+## Quick start
 
-- [T3 Code](https://t3.codes) desktop app
-- A [Boat](https://boat.dev) account (t3boat walks you through the CLI sign-in)
-- macOS, Windows or Linux
-
-## Install
-
-No prebuilt download yet. Build from source with [Rust](https://rustup.rs) and [Bun](https://bun.sh). Windows also needs the [Microsoft C++ Build Tools](https://v2.tauri.app/start/prerequisites/#windows), Linux [Tauri's system packages](https://v2.tauri.app/start/prerequisites/#linux) (Debian/Ubuntu: `sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev build-essential file`).
+### 1. Build & run the headless daemon (Linux VPS / CLI — no GTK needed)
 
 ```sh
-git clone https://github.com/paukraft/t3boat && cd t3boat
+cd apps/desktop/src-tauri
+cargo build --no-default-features --release --bin t3agent37-daemon
+
+export AGENT37_API_KEY="sk_live_..."
+./target/release/t3agent37-daemon
+```
+
+Interactive daemon commands: `list`, `create <name> [size] [type] [region] [disk_gb]`, `pair <id>`, `wake <id>`, `sleep <id>`, `keep <id> [min]`, `resize <id> <size> [disk_gb]`, `grow-disk <id> <gb>`, `github <id> [pat]`, `signin <id> <Claude|Codex>`, `connect <id>`, `delete <id> [discard]`, `costs`.
+
+### 2. Optional: Build the custom Agent37 template (faster boots)
+
+```sh
+npx agent37 templates build template --name t3agent37 --default-port 3773
+```
+
+Then set Template to `t3agent37` in Settings (works out of the box on stock `agent37-base` too).
+
+### 3. Build the desktop Tauri tray app
+
+Requires Rust, Bun, and [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/).
+
+```sh
 bun install
 bun run build:desktop
 ```
 
-The app lands in `apps/desktop/src-tauri/target/release/bundle/`:
-
-- **macOS**: copy `macos/t3boat.app` to `/Applications` and open it. It lives in the menu bar.
-- **Windows**: run `nsis/t3boat_*-setup.exe`. It lives in the system tray, maybe behind the overflow arrow.
-- **Linux**: install `deb/t3boat_*.deb` or run the AppImage in `appimage/`. It lives in the system tray; without one (GNOME without AppIndicator) it opens as a window.
-
-Or let your agent do it:
-
-```
-Please build and install t3boat (https://github.com/paukraft/t3boat) on my computer: clone it, follow the Install section of its README, and open the app when it's done.
-```
-
-## Usage
-
-1. Click the boat in the menu bar and create a machine.
-2. Accept the new backend in T3 Code.
-3. Work in T3 Code as usual. Push or open a PR from the machine.
-
-To let Claude Code or Codex on your computer manage machines, click "Add" next to them in t3boat's settings.
-
-## Development
+## Development & Tests
 
 ```sh
-bun run dev           # website (apps/web)
-bun run dev:desktop   # menu bar app (apps/desktop, Tauri)
+# Rust unit + end-to-end mock Agent37 integration tests (no GTK required)
+cd apps/desktop/src-tauri && cargo test --no-default-features
+
+# Frontend typecheck & production bundle
+bun --filter @t3boat/desktop build
 ```
 
-Architecture: [apps/desktop/docs/architecture.md](apps/desktop/docs/architecture.md).
+Architecture details: [apps/desktop/docs/architecture.md](apps/desktop/docs/architecture.md).
 
 ## License
 
-[MIT](LICENSE). Made by [Pau Kraft](https://x.com/paukraft). Not affiliated with or endorsed by T3 Code or Boat.
+[MIT](LICENSE). Based on [t3boat](https://github.com/paukraft/t3boat) by Pau Kraft. Not affiliated with or endorsed by T3 Code or Agent37.

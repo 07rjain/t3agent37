@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { call, errorText, useUiState } from "./api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { call, errorText, inWebDaemon, useUiState, type Notice } from "./api";
 import type { LocalProject, McpClient, MachineView, SetupAction, UiState } from "./types";
 import { machineKey, type Action } from "./machine";
 import { Ocean, type OceanBoat } from "./components/Ocean";
 import { MachineRow } from "./components/MachineRow";
-import { NewMachine } from "./components/NewMachine";
+import { NewMachine, type NewMachineSpec } from "./components/NewMachine";
 import { SettingsView } from "./components/SettingsView";
 import { MachineDetails } from "./components/MachineDetails";
 import { SetupView } from "./components/SetupView";
@@ -31,14 +31,40 @@ function useToast() {
 }
 
 export default function App() {
-  const { state, loadError, retry } = useUiState();
   const { toast, show, dismiss } = useToast();
+  const onNotice = useCallback(
+    (n: Notice) => show(n.body ? `${n.title}: ${n.body}` : n.title, "info"),
+    [show],
+  );
+  const { state, loadError, retry } = useUiState(onNotice);
+  const prevNames = useRef<Map<string, string> | null>(null);
+
+  // Surface live machine creation & deletion events in Web UI even when triggered via MCP/CLI.
+  useEffect(() => {
+    if (!inWebDaemon || !state || state.setup !== "ready") return;
+    const current = new Map(state.machines.map((m) => [machineKey(m), `${m.name} (${m.state})`]));
+    const prev = prevNames.current;
+    if (prev) {
+      for (const m of state.machines) {
+        const key = machineKey(m);
+        if (!prev.has(key)) {
+          show(m.state === "creating" ? `Spinning up ${m.name}…` : `${m.name} appeared (${m.state})`, "info");
+        }
+      }
+      for (const [key, desc] of prev) {
+        if (!current.has(key) && !key.startsWith("new:")) {
+          show(`Deleted ${desc.split(" ")[0]}`, "info");
+        }
+      }
+    }
+    prevNames.current = current;
+  }, [state, show]);
 
   let body;
   if (loadError) {
     body = (
       <div className="view center">
-        <p className="lede">Couldn't reach t3boat: {loadError}</p>
+        <p className="lede">Couldn't reach t3agent37: {loadError}</p>
         <button className="btn btn-solid" onClick={retry}>
           Try again
         </button>
@@ -53,14 +79,16 @@ export default function App() {
   }
 
   return (
-    <div className="app">
-      {body}
-      {toast ? (
-        <div key={toast.id} className={`toast is-${toast.tone}`} role={toast.tone === "error" ? "alert" : "status"} onClick={dismiss}>
-          {toast.tone === "error" ? <Icon name="alert" size={12} /> : null}
-          <span>{toast.text}</span>
-        </div>
-      ) : null}
+    <div className={inWebDaemon ? "web-shell" : "app-root"}>
+      <div className={`app${inWebDaemon ? " is-web" : ""}`}>
+        {body}
+        {toast ? (
+          <div key={toast.id} className={`toast is-${toast.tone}`} role={toast.tone === "error" ? "alert" : "status"} onClick={dismiss}>
+            {toast.tone === "error" ? <Icon name="alert" size={12} /> : null}
+            <span>{toast.text}</span>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -73,19 +101,25 @@ function without<T>(record: Record<string, T>, key: string): Record<string, T> {
 function Brand() {
   return (
     <div className="brand">
-      <span className="brand-name">t3boat</span>
+      <span className="brand-name">t3agent37</span>
+      {inWebDaemon ? (
+        <span className="live-pill" title="Connected to t3agent37-daemon via real-time SSE">
+          <i className="live-dot" aria-hidden /> live
+        </span>
+      ) : null}
     </div>
   );
 }
 
 function Setup({ state, onError }: { state: UiState; onError: (t: string) => void }) {
   const act = (action: SetupAction) => call("setup_action", { action }).catch((e) => onError(errorText(e)));
+  const saveKey = (apiKey: string) => call("save_api_key", { apiKey }).catch((e) => onError(errorText(e)));
   return (
     <>
-      <Ocean boats={[{ key: "setup", name: "t3boat", state: "creating" }]}>
+      <Ocean boats={[{ key: "setup", name: "t3agent37", state: "creating" }]}>
         <Brand />
       </Ocean>
-      <SetupView setup={state.setup} busy={state.setupBusy} signInCode={state.signInCode} onAction={act} />
+      <SetupView setup={state.setup} busy={state.setupBusy} onAction={act} onSaveKey={saveKey} />
     </>
   );
 }
@@ -172,7 +206,11 @@ function Ready({ state, toast }: { state: UiState; toast: (t: string, tone?: "er
           await call("keep_awake", { id: m.id, minutes: a.minutes });
           return;
         case "resize_machine":
-          await call("resize_machine", { id: m.id, size: a.size });
+          await call("resize_machine", { id: m.id, size: a.size, diskGb: a.diskGb });
+          return;
+        case "sign_in_github":
+          await call("sign_in_github", { id: m.id });
+          toast(`GitHub is signed in on ${m.name}`, "info");
           return;
         case "open_machine":
           await call("open_machine", { id: m.id, thread: a.thread });
@@ -186,9 +224,9 @@ function Ready({ state, toast }: { state: UiState; toast: (t: string, tone?: "er
 
   const addMcp = (client: McpClient) => call("add_mcp", { client }).catch((e) => toast(errorText(e)));
 
-  const create = (name: string, size: string, projects: string[]) => {
+  const create = (spec: NewMachineSpec) => {
     setView("list");
-    call("create_machine", { name, size, projects }).catch((e) => toast(errorText(e)));
+    call("create_machine", spec).catch((e) => toast(errorText(e)));
   };
 
   return (
@@ -210,6 +248,7 @@ function Ready({ state, toast }: { state: UiState; toast: (t: string, tone?: "er
           key={selected.id}
           machine={selected}
           sizes={state.sizes}
+          signInCode={state.signInCode}
           version={state}
           pending={pending[machineKey(selected)] ?? null}
           deleteError={deleteErrors[machineKey(selected)] ?? null}
@@ -236,8 +275,8 @@ function Ready({ state, toast }: { state: UiState; toast: (t: string, tone?: "er
             <div className="empty">
               <h1 className="display">No machines yet</h1>
               <p className="lede">
-                A machine is a cloud computer your T3 Code agents work on. It sleeps when nobody's working, and
-                sleeping is free.
+                A machine is an Agent37 cloud computer your T3 Code agents work on. It sleeps when nobody's working,
+                and asleep only its disk bills.
               </p>
               <button className="btn btn-solid btn-lg" onClick={() => setView("new")}>
                 <Icon name="plus" /> New machine

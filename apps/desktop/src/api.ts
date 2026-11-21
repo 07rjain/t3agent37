@@ -1,13 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CommandArgs, CommandName, CommandResult, MachineDetails, UiState } from "./types";
 
+export interface Notice {
+  title: string;
+  body: string;
+}
+
 export interface Backend {
   call<C extends CommandName>(cmd: C, args: CommandArgs<C>): Promise<CommandResult<C>>;
   /** Calls `cb` on every "state" event. Returns an unsubscribe function. */
-  subscribe(cb: (s: UiState) => void): () => void;
+  subscribe(cb: (s: UiState) => void, onNotice?: (n: Notice) => void): () => void;
 }
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+export const inWebDaemon =
+  typeof window !== "undefined" &&
+  !inTauri &&
+  Boolean((window as unknown as { __T3AGENT37_WEB__?: boolean }).__T3AGENT37_WEB__);
 
 async function tauriBackend(): Promise<Backend> {
   const [{ invoke }, { listen }] = await Promise.all([
@@ -23,9 +32,46 @@ async function tauriBackend(): Promise<Backend> {
   };
 }
 
+function httpBackend(): Backend {
+  return {
+    async call(cmd, args) {
+      const res = await fetch(`/api/cmd/${encodeURIComponent(cmd)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(args ?? {}),
+      });
+      if (!res.ok) {
+        throw (await res.text()) || `HTTP ${res.status}`;
+      }
+      const text = await res.text();
+      return (text ? JSON.parse(text) : undefined) as never;
+    },
+    subscribe(cb, onNotice) {
+      const es = new EventSource("/api/events");
+      es.addEventListener("state", (e) => {
+        try {
+          cb(JSON.parse((e as MessageEvent<string>).data) as UiState);
+        } catch {}
+      });
+      if (onNotice) {
+        es.addEventListener("notify", (e) => {
+          try {
+            onNotice(JSON.parse((e as MessageEvent<string>).data) as Notice);
+          } catch {}
+        });
+      }
+      return () => es.close();
+    },
+  };
+}
+
 let backendPromise: Promise<Backend> | null = null;
 function backend(): Promise<Backend> {
-  backendPromise ??= inTauri ? tauriBackend() : import("./mock").then((m) => m.mockBackend());
+  backendPromise ??= inTauri
+    ? tauriBackend()
+    : inWebDaemon
+      ? Promise.resolve(httpBackend())
+      : import("./mock").then((m) => m.mockBackend());
   return backendPromise;
 }
 
@@ -40,17 +86,26 @@ export function errorText(e: unknown): string {
   return "Something went wrong";
 }
 
-export function useUiState(): { state: UiState | null; loadError: string | null; retry: () => void } {
+export function useUiState(onNotice?: (n: Notice) => void): {
+  state: UiState | null;
+  loadError: string | null;
+  retry: () => void;
+} {
   const [state, setState] = useState<UiState | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const noticeRef = useRef(onNotice);
+  noticeRef.current = onNotice;
 
   useEffect(() => {
     let alive = true;
     let unsubscribe: (() => void) | undefined;
     backend().then((b) => {
       if (!alive) return;
-      unsubscribe = b.subscribe((s) => alive && setState(s));
+      unsubscribe = b.subscribe(
+        (s) => alive && setState(s),
+        (n) => alive && noticeRef.current?.(n),
+      );
       b.call("get_state", undefined).then(
         (s) => alive && setState(s),
         (e) => alive && setLoadError(errorText(e)),

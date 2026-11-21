@@ -45,8 +45,9 @@ impl MachineRuntime {
             .shared
             .http
             .post(format!("{}/api/auth/pairing-token", self.upstream_url()))
+            .headers(self.edge_headers())
             .bearer_auth(self.upstream_token())
-            .json(&json!({"label": "t3boat link", "scopes": SCOPES}))
+            .json(&json!({"label": "t3agent37 link", "scopes": SCOPES}))
             .timeout(Duration::from_secs(10))
             .send()
             .await?

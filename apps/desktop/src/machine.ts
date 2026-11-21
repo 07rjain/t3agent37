@@ -1,4 +1,4 @@
-import type { MachineState, MachineView, Size } from "./types";
+import type { InstanceType, MachineState, MachineView, Region, Size } from "./types";
 
 const TAGS: Record<MachineState, string> = {
   working: "working",
@@ -31,8 +31,9 @@ export type Action = {
   solid?: boolean;
 } & (
   | { cmd: "open_machine"; thread?: string }
-  | { cmd: "pair_machine" | "wake_machine" | "sleep_machine" | "turn_on_connect" }
-  | { cmd: "resize_machine"; size: string }
+  | { cmd: "pair_machine" | "wake_machine" | "sleep_machine" | "turn_on_connect" | "sign_in_github" }
+  /** a new shape, a bigger disk (GB), or both */
+  | { cmd: "resize_machine"; size?: string; diskGb?: number }
   /** null = until stopped (auto sleep off), 0 ends it */
   | { cmd: "keep_awake"; minutes: number | null }
   /** the agent's name as `signedOut` lists it */
@@ -60,6 +61,7 @@ export const ACTIONS = {
   retry: { cmd: "wake_machine", label: "Try waking", busy: "Waking…" },
   sleep: { cmd: "sleep_machine", label: "Sleep now", busy: "Sleeping…" },
   connect: { cmd: "turn_on_connect", label: "Turn on", busy: "Approve in browser…" },
+  github: { cmd: "sign_in_github", label: "Sign in GitHub", busy: "Approve in browser…" },
   remove: { cmd: "delete_machine", label: "Remove", busy: "Removing…", discard: true },
   del: { cmd: "delete_machine", label: "Delete", busy: "Deleting…", discard: false },
   deleteAnyway: { cmd: "delete_machine", label: "Delete anyway", busy: "Deleting…", discard: true },
@@ -115,6 +117,20 @@ export const resizeTo = (size: string): Action => ({
   size,
 });
 
+/** GB a "grow disk" adds. */
+export const DISK_STEP = 8;
+
+/** Grows the disk by `DISK_STEP`, up to its shape's limit; null once there. */
+export function growDisk(m: MachineView, sizes: Size[]): Action | null {
+  const max = sizeOf(sizes, m.size)?.maxDisk ?? m.diskGb;
+  const to = Math.min(m.diskGb + DISK_STEP, max);
+  if (to <= m.diskGb) return null;
+  return { cmd: "resize_machine", label: `Grow disk (+${to - m.diskGb} GB)`, busy: "Growing disk…", diskGb: to };
+}
+
+/** The shape fits this machine: `max` needs a VM, and a disk never shrinks below what it has. */
+export const shapeFits = (s: Size, type: InstanceType, diskGb = 0) => !(s.vmOnly && type === "default") && s.maxDisk >= diskGb;
+
 /** Secondary actions for the ⋯ menu (delete is always appended by the menu). */
 export function menuActions(m: MachineView, sizes: Size[]): MenuItem[] {
   if (!m.id || m.state === "missing") return [];
@@ -123,7 +139,10 @@ export function menuActions(m: MachineView, sizes: Size[]): MenuItem[] {
   if (m.state === "working" || m.state === "idle") out.push(ACTIONS.sleep);
   out.push(PICK_PROJECT);
   if (m.paired) out.push(ACTIONS.repair);
-  sizes.filter((s) => s.id !== m.size).forEach((s) => out.push(resizeTo(s.id)));
+  if (!m.githubSignedIn) out.push(ACTIONS.github);
+  const grow = growDisk(m, sizes);
+  if (grow) out.push(grow);
+  sizes.filter((s) => s.id !== m.size && shapeFits(s, m.instanceType, m.diskGb)).forEach((s) => out.push(resizeTo(s.id)));
   return out;
 }
 
@@ -134,13 +153,39 @@ export function powerAction(m: MachineView): Action | null {
   return null;
 }
 
-/** When a resize takes effect, per contract. */
+/** When a resize takes effect, per contract: Agent37 recreates the container, keeping its disk. */
 export function resizeHint(m: MachineView): string {
-  if (m.state === "asleep") return "Applies on next wake";
-  if (m.state === "working" || m.waiting) return "Applies after it next sleeps, never mid-turn";
-  if (m.state === "idle") return "Restarts onto the new size now";
-  return "Billed only while awake";
+  const kept = "keeps the disk, loses what's only in memory";
+  if (m.state === "asleep") return `Wakes it first, then recreates it on the new size · ${kept}`;
+  if (m.state === "working" || m.waiting) return `Wait for agents to finish before resizing · ${kept}`;
+  if (m.state === "idle") return `Recreates it on the new size now · ${kept}`;
+  return `Recreates it on the new size · ${kept}`;
 }
+
+export const INSTANCE_TYPES: { id: InstanceType; label: string; spec: string; multiplier: number }[] = [
+  { id: "default", label: "container", spec: "Fast to wake", multiplier: 1 },
+  { id: "vm", label: "vm", spec: "Full VM · Docker", multiplier: 2.5 },
+  { id: "performance", label: "performance", spec: "Dedicated VM", multiplier: 4 },
+];
+
+export const REGIONS: { id: Region; label: string }[] = [
+  { id: "us", label: "us" },
+  { id: "eu", label: "eu" },
+  { id: "ap-south", label: "ap-south" },
+];
+
+export const instanceLabel = (t: InstanceType) => INSTANCE_TYPES.find((x) => x.id === t)?.label ?? t;
+
+/** Compute per awake hour for this shape on this instance type. */
+export const computeHourly = (s: Size, type: InstanceType) =>
+  s.hourly * (INSTANCE_TYPES.find((x) => x.id === type)?.multiplier ?? 1);
+
+/** Agent37 bills disk by the GB-month, awake or asleep. */
+export const DISK_MONTHLY_PER_GB = 0.09;
+export const diskMonthly = (gb: number) => gb * DISK_MONTHLY_PER_GB;
+
+/** "3.2 GB" */
+export const gigabytes = (bytes: number) => `${(bytes / 1e9).toFixed(bytes < 10e9 ? 1 : 0)} GB`;
 
 /** "2h 14m", "2h", "38m", "0m" */
 export function duration(secs: number): string {
@@ -171,6 +216,7 @@ export const shortDate = (unixSecs: number) =>
 
 export const money = (n: number) => `$${n.toFixed(2)}`;
 export const hourly = (n: number) => `$${n < 0.1 ? n.toFixed(3) : n.toFixed(2)}/h`;
+export const monthly = (n: number) => `${money(n)}/mo`;
 
 export const sizeOf = (sizes: Size[], id: string) => sizes.find((s) => s.id === id);
 

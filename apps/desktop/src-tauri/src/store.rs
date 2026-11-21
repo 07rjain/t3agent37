@@ -1,6 +1,7 @@
 //! Persistent app state: machines, settings and this month's spend, one JSON file in the app
 //! data dir.
 
+use crate::agent37::{self, InstanceType, Region};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -9,17 +10,26 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Machine {
-    /// Never changes: the id of the sandbox the machine was created on.
+    /// Never changes: the id of the Agent37 instance the machine was created on.
     pub id: String,
-    /// Boat sandbox it runs on now, e.g. `bx_sad32u26`: another one after a restore.
+    /// Agent37 instance id (same as `id` on Agent37; kept for clarity).
     pub sandbox_id: String,
     pub name: String,
+    /// Shape id: small | medium | large | xlarge | max.
     pub size: String,
-    /// Public HTTPS URL of the T3 server on the sandbox.
+    #[serde(default)]
+    pub instance_type: InstanceType,
+    #[serde(default)]
+    pub region: Region,
+    #[serde(default = "default_disk_gb")]
+    pub disk_gb: u32,
+    #[serde(default = "default_template")]
+    pub template: String,
+    /// Authenticated HTTPS URL of the T3 server (`https://{id}-3773.agent37.app`).
     pub upstream_url: String,
     /// Bearer token the proxy uses upstream. Never leaves this computer except to that server.
     pub upstream_token: String,
-    /// Public HTTPS URL of the watchdog on the sandbox.
+    /// Authenticated HTTPS URL of the read-only watchdog (`https://{id}-3774.agent37.app`).
     pub watchdog_url: String,
     pub watchdog_secret: String,
     /// Loopback port the proxy serves this machine on. Stable, T3 Code stores it.
@@ -42,9 +52,17 @@ pub struct Machine {
     /// T3 Connect is on there: other devices reach it with the user's T3 account.
     #[serde(default)]
     pub connect: bool,
-    /// The stop its saved snapshot holds, as this app saved it from the stopped sandbox.
+    /// Whether `gh` is authenticated on the instance for private repository clones.
     #[serde(default)]
-    pub saved_stop: Option<chrono::DateTime<chrono::Utc>>,
+    pub github_signed_in: bool,
+}
+
+fn default_disk_gb() -> u32 {
+    12
+}
+
+fn default_template() -> String {
+    agent37::DEFAULT_TEMPLATE.to_owned()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -59,28 +77,43 @@ pub struct LinkToken {
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     pub start_at_login: bool,
+    /// Agent37 template used for newly created machines (`agent37-base` or custom `t3agent37`).
+    pub template: String,
+    /// Optional platform-side `auto_sleep` safety fuse in minutes (30..1440) for when the laptop
+    /// closes; `None` disables platform auto-sleep so quiet long-running agents are never frozen.
+    pub auto_sleep_fuse_minutes: Option<u32>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { start_at_login: true }
+        Self {
+            start_at_login: true,
+            template: agent37::DEFAULT_TEMPLATE.to_owned(),
+            auto_sleep_fuse_minutes: None,
+        }
     }
 }
 
-/// One sandbox's spend as last looked up. Kept after the sandbox is gone (its machine deleted, or
-/// a restore replaced it) so the totals still count it until its month is over.
+/// One instance's estimated spend tracked locally (Agent37's per-instance ledger stays in its
+/// dashboard). Kept after deletion so monthly totals stay accurate until the month rolls over.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Spend {
-    /// Id of the machine that ran on the sandbox.
+    /// Id of the machine that ran on the instance.
     pub machine: String,
-    /// Start of the local day of the lookup, unix seconds.
+    /// Start of the local day of the last accrual, unix seconds.
     pub day: i64,
-    /// Dollars since `day`.
+    /// Start of the local month of the last accrual, unix seconds.
+    #[serde(default)]
+    pub month_start: i64,
+    /// Dollars accrued since `day` (compute + disk).
     pub today: f64,
     pub awake_secs_today: u64,
-    /// Dollars since the start of `day`'s month.
+    /// Dollars accrued since `month_start` (compute + disk).
     pub month: f64,
+    /// Unix seconds of the last accrual tick.
+    #[serde(default)]
+    pub last_tick_at: i64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -88,27 +121,21 @@ pub struct Spend {
 pub struct State {
     pub machines: Vec<Machine>,
     pub settings: Settings,
-    /// By sandbox id.
+    /// By instance id.
     pub spend: HashMap<String, Spend>,
     /// Local ports of deleted machines, never given out again: T3 Code may still list one (it
     /// cannot be told to forget a backend), and would reach a new machine there as the old.
     pub retired_ports: Vec<u16>,
-    /// What to delete on Boat until Boat confirms each gone.
+    /// Instances to keep deleting on Agent37 until `GET /v1/instances` confirms each gone.
     pub doomed: Vec<Doomed>,
-    /// Older state files' sandboxes of creates still running, loaded into `doomed`. Never written:
-    /// those go to `doomed` now, with their snapshot.
-    #[serde(skip_serializing)]
-    pub pending_sandboxes: Vec<String>,
 }
 
-/// A deleted machine's sandbox and saved snapshot, or those of a create that failed or never
-/// finished: its watchdog runs, and can save the snapshot, before the create is done. The
-/// snapshot waits for its sandbox: a live one's watchdog can save it again.
+/// A deleted machine's instance, or one from a create that failed or was interrupted: an instance
+/// left behind bills retained disk forever until deleted.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Doomed {
     pub sandbox: Option<String>,
-    pub snapshot: Option<String>,
 }
 
 pub struct Store {
@@ -117,9 +144,7 @@ pub struct Store {
 
 impl Store {
     pub fn new(dir: &Path) -> Self {
-        Self {
-            path: dir.join("state.json"),
-        }
+        Self { path: dir.join("state.json") }
     }
 
     pub fn load(&self) -> Result<State> {

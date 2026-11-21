@@ -114,7 +114,12 @@ impl MachineRuntime {
             reads.into_iter().map(|(key, payload)| (key, ("projects.readFile".to_owned(), payload))).unzip();
         let answers = tokio::time::timeout_at(
             deadline,
-            upstream::call_many(&self.upstream_url(), &self.upstream_token(), requests),
+            upstream::call_many_with_headers(
+                &self.upstream_url(),
+                &self.upstream_token(),
+                &self.edge_headers(),
+                requests,
+            ),
         )
         .await??;
         let mut cache = self.cache.lock().unwrap();
@@ -138,8 +143,16 @@ impl MachineRuntime {
         if !self.cache.lock().unwrap().streams.contains_key(&key) {
             return;
         }
-        let (url, token) = (self.upstream_url(), self.upstream_token());
-        let first = upstream::subscribe_until(&url, &token, TAG, json!({}), CAPTURE_BUDGET, |list| Some(list.clone()));
+        let (url, token, headers) = (self.upstream_url(), self.upstream_token(), self.edge_headers());
+        let first = upstream::subscribe_until_with_headers(
+            &url,
+            &token,
+            &headers,
+            TAG,
+            json!({}),
+            CAPTURE_BUDGET,
+            |list| Some(list.clone()),
+        );
         let list = tokio::time::timeout_at(deadline, first).await;
         let mut cache = self.cache.lock().unwrap();
         match (list, cache.streams.get_mut(&key)) {
@@ -156,6 +169,7 @@ impl MachineRuntime {
             .shared
             .http
             .get(format!("{}/api/orchestration/{path}", self.upstream_url()))
+            .headers(self.edge_headers())
             .bearer_auth(self.upstream_token())
             .header("x-t3-orchestration-protocol", "2")
             .timeout(Duration::from_secs(30))

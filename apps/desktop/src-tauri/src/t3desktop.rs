@@ -41,6 +41,17 @@ pub struct T3Desktop {
     token_file: Option<PathBuf>,
     /// Held across read-or-issue so overlapping calls share one session.
     token: Arc<tokio::sync::Mutex<Option<String>>>,
+    /// Shared lightweight HTTP client for talking to the local desktop T3 server.
+    http: reqwest::Client,
+}
+
+fn local_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .pool_max_idle_per_host(2)
+        .pool_idle_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 impl T3Desktop {
@@ -52,12 +63,11 @@ impl T3Desktop {
             .iter()
             .map(|name| bin.join(name))
             .find(|p| p.is_file())
-            .map(|cli| Self { cli, token_file: None, token: Arc::default() })
+            .map(|cli| Self { cli, token_file: None, token: Arc::default(), http: local_http_client() })
     }
 
-    #[cfg(test)]
     pub fn at(cli: PathBuf) -> Self {
-        Self { cli, token_file: None, token: Arc::default() }
+        Self { cli, token_file: None, token: Arc::default(), http: local_http_client() }
     }
 
     pub fn with_token_file(mut self, path: PathBuf) -> Self {
@@ -93,7 +103,9 @@ impl T3Desktop {
             .await
             .context("running t3 environment")?;
         if !out.status.success() {
-            bail!("t3 environment {}: {}", args[0], String::from_utf8_lossy(&out.stderr).trim());
+            let err = String::from_utf8_lossy(&out.stderr);
+            let msg = if err.trim().is_empty() { String::from_utf8_lossy(&out.stdout) } else { err };
+            bail!("t3 environment {}: {}", args[0], msg.trim());
         }
         Ok(out.stdout)
     }
@@ -143,20 +155,24 @@ impl T3Desktop {
     /// pinned first, then most recently used. Asks for the trimmed snapshot T3's own client
     /// loads: every project, without the thousands of old threads (MBs, seconds) this ignores.
     pub async fn projects(&self) -> Result<Vec<Project>> {
+        let http = self.http.clone();
         let shell = self
-            .authorized(|origin, token| async move {
-                let res = reqwest::Client::new()
-                    .get(format!("{origin}/api/orchestration/shell"))
-                    .query(&[("omitIdleSubagents", "1"), ("omitOlderSettled", "1")])
-                    .bearer_auth(token)
-                    .header("x-t3-orchestration-protocol", "2")
-                    .timeout(Duration::from_secs(10))
-                    .send()
-                    .await?;
-                if res.status() == reqwest::StatusCode::UNAUTHORIZED {
-                    return Err(Unauthorized.into());
+            .authorized(|origin, token| {
+                let http = http.clone();
+                async move {
+                    let res = http
+                        .get(format!("{origin}/api/orchestration/shell"))
+                        .query(&[("omitIdleSubagents", "1"), ("omitOlderSettled", "1")])
+                        .bearer_auth(token)
+                        .header("x-t3-orchestration-protocol", "2")
+                        .timeout(Duration::from_secs(10))
+                        .send()
+                        .await?;
+                    if res.status() == reqwest::StatusCode::UNAUTHORIZED {
+                        return Err(Unauthorized.into());
+                    }
+                    Ok(res.error_for_status()?.json::<Value>().await?)
                 }
-                Ok(res.error_for_status()?.json::<Value>().await?)
             })
             .await?;
         Ok(projects::cloneable(&shell))

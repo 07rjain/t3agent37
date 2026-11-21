@@ -1,5 +1,5 @@
+pub mod agent37;
 pub mod app;
-pub mod boat;
 pub mod machine;
 pub mod mcp;
 pub mod process;
@@ -7,6 +7,9 @@ pub mod projects;
 pub mod proxy;
 pub mod store;
 pub mod t3desktop;
+#[cfg(feature = "desktop")]
 mod tray;
+pub mod webui;
 
+#[cfg(feature = "desktop")]
 pub use tray::run;

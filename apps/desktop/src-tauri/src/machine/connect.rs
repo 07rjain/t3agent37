@@ -1,7 +1,5 @@
 //! T3 Connect: T3's own way for other devices (a phone, a browser) to reach a machine with the
-//! user's T3 account, through a tunnel the machine dials out. It is set up on the machine itself
-//! with T3's `t3 up --connect`, which t3boat runs there: its sign-in page opens here, and once it
-//! is on, t3boat turns on the one setting a sleeping machine needs.
+//! user's T3 account, through a tunnel the machine dials out.
 
 use super::MachineRuntime;
 use anyhow::{bail, Result};
@@ -9,18 +7,13 @@ use reqwest::Method;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
-/// T3's device sign-in lasts 10 minutes; then the restart and the first tunnel connection.
 const SETUP_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const URL_TIMEOUT: Duration = Duration::from_secs(120);
 
 impl MachineRuntime {
-    /// Resolves once other devices can reach the machine through T3 Connect, after the user
-    /// signed in to their T3 account in the browser.
     pub async fn turn_on_connect(&self) -> Result<()> {
         self.ensure_awake().await?;
-        // `t3 up` restarts T3 to start the tunnel, which stops running agent turns and expires
-        // the approvals they wait on.
-        let s = self.watchdog_get("/status?fresh").await?;
+        let s = self.watchdog_get("/t3boat-status?fresh").await?;
         if s.busy {
             bail!("an agent is working; turn T3 Connect on once it finishes");
         }
@@ -28,8 +21,6 @@ impl MachineRuntime {
             bail!("an agent is waiting on you there; answer it, then turn T3 Connect on");
         }
         self.kept_awake(self.run_connect_setup()).await?;
-        // A webhook sent while the machine sleeps is then held by T3 Connect's relay and run as
-        // it wakes, instead of failing.
         let state = self.connect_api(Method::GET, "link-state", None).await?;
         let preferences = json!({
             "publishAgentActivity": state["publishAgentActivity"].as_bool().unwrap_or(false),
@@ -40,8 +31,6 @@ impl MachineRuntime {
         Ok(())
     }
 
-    /// Reads whether T3 Connect is on, for a machine that just woke: it can be turned on or off
-    /// on the machine too.
     pub(super) async fn refresh_connect(&self) {
         match self.connect_api(Method::GET, "link-state", None).await {
             Ok(state) => {
@@ -56,9 +45,8 @@ impl MachineRuntime {
 
     async fn run_connect_setup(&self) -> Result<()> {
         let id = self.sandbox_id();
-        let boat = &self.shared.boat;
-        // In the background, so the sign-in page can be read while it waits; `exit` says how it ended.
-        let dir = boat
+        let a37 = &self.shared.agent37;
+        let dir = a37
             .exec_ok(
                 &id,
                 "d=$(mktemp -d); \
@@ -67,25 +55,30 @@ impl MachineRuntime {
                 30,
             )
             .await?;
-        let dir = dir.lines().last().unwrap_or_default().trim().to_owned();
+        let dir = super::github::validate_tmp_dir(dir.lines().last().unwrap_or_default().trim())?;
         let result = self.finish_connect_setup(&dir).await;
-        let _ = boat.exec(&id, &format!("rm -rf '{dir}'"), 30).await;
+        let _ = a37.exec(&id, &format!("rm -rf '{dir}'; pkill -f '[t]3 up --connect' 2>/dev/null || true"), None, 30).await;
         result
     }
 
     async fn finish_connect_setup(&self, dir: &str) -> Result<()> {
         let id = self.sandbox_id();
-        let boat = &self.shared.boat;
+        let a37 = &self.shared.agent37;
         let started = Instant::now();
         let mut opened = false;
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            let out = boat
-                .exec(&id, &format!("cat '{dir}/exit' 2>/dev/null; echo ---; cat '{dir}/log'"), 30)
+            let out = a37
+                .exec(&id, &format!("cat '{dir}/exit' 2>/dev/null; echo ---; cat '{dir}/log'"), None, 30)
                 .await?;
             let (exit, log) = out.stdout.split_once("---").unwrap_or_default();
-            if !opened && let Some(url) = log.split_whitespace().find(|w| w.starts_with("https://")) {
-                crate::app::open_url(url)?;
+            if !opened
+                && let Some(raw) = log.split_whitespace().find(|w| w.starts_with("https://"))
+                && let Ok(parsed) = url::Url::parse(raw)
+                && parsed.scheme() == "https"
+                && parsed.host_str().is_some_and(is_trusted_connect_host)
+            {
+                crate::app::open_url(parsed.as_str())?;
                 opened = true;
             }
             match exit.trim() {
@@ -102,13 +95,13 @@ impl MachineRuntime {
         }
     }
 
-    /// T3's `/api/connect/*` routes on the machine.
     async fn connect_api(&self, method: Method, route: &str, body: Option<Value>) -> Result<Value> {
         let url = format!("{}/api/connect/{route}", self.upstream_url());
         let mut req = self
             .shared
             .http
             .request(method, url)
+            .headers(self.edge_headers())
             .bearer_auth(self.upstream_token())
             .timeout(Duration::from_secs(15));
         if let Some(body) = body {
@@ -120,6 +113,14 @@ impl MachineRuntime {
         }
         Ok(res.json().await?)
     }
+}
+
+fn is_trusted_connect_host(host: &str) -> bool {
+    let h = host.to_ascii_lowercase();
+    matches!(h.as_str(), "t3.codes" | "t3.chat" | "t3.gg")
+        || h.ends_with(".t3.codes")
+        || h.ends_with(".t3.chat")
+        || h.ends_with(".t3.gg")
 }
 
 fn last_line(log: &str) -> &str {

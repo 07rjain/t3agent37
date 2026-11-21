@@ -1,17 +1,69 @@
 // Browser-only stand-in for the Tauri backend so `bun run dev` works without Tauri.
-// URL params shape the starting state: ?setup=installBoat|signInBoat|installT3|starting
+// URL params shape the starting state: ?setup=apiKey|installT3|starting
 // ?machines=0|many|<count>  ?busy=1  ?mcp=mixed (Claude Code added, Codex not installed)
 // ?projects=0|error (T3 Code has no projects with a remote / listing them fails)
 // ?ready=1 (a new machine comes up in T3 Code with its agents signed in and acme on it, as the website shows it)
+// ?disk=full (devbox's disk is nearly full)  ?wallet=low
 import type { Backend } from "./api";
 import { timeLapse } from "./pixel/clock";
-import type { CommandArgs, CommandName, LocalProject, MachineDetails, MachineProject, MachineView, Setup, UiState } from "./types";
+import { computeHourly, diskMonthly, monthly } from "./machine";
+import type {
+  CommandArgs,
+  CommandName,
+  DiskUsage,
+  InstanceType,
+  LocalProject,
+  MachineDetails,
+  MachineProject,
+  MachineView,
+  Setup,
+  Size,
+  UiState,
+} from "./types";
 
 const params = new URLSearchParams(location.search);
 
-type Seed = Omit<MachineView, "countdown" | "signedOut" | "projects" | "keepAwakeUntil" | "keepAwakeForever" | "waiting"> &
-  Partial<Pick<MachineView, "countdown" | "signedOut" | "projects">>;
-const machine = (m: Seed): MachineView => ({
+/** Agent37's shapes: $0.80 per vCPU and $0.70 per GB of RAM a month, by the awake hour. */
+const SIZES: Size[] = [
+  { id: "small", spec: "2 vCPU · 4 GB", cpu: 2, memory: 4, minDisk: 2, maxDisk: 12, defaultDisk: 12, vmOnly: false },
+  { id: "medium", spec: "4 vCPU · 8 GB", cpu: 4, memory: 8, minDisk: 2, maxDisk: 20, defaultDisk: 12, vmOnly: false },
+  { id: "large", spec: "4 vCPU · 16 GB", cpu: 4, memory: 16, minDisk: 2, maxDisk: 40, defaultDisk: 20, vmOnly: false },
+  { id: "xlarge", spec: "4 vCPU · 32 GB", cpu: 4, memory: 32, minDisk: 2, maxDisk: 80, defaultDisk: 32, vmOnly: false },
+  { id: "max", spec: "8 vCPU · 64 GB", cpu: 8, memory: 64, minDisk: 2, maxDisk: 80, defaultDisk: 40, vmOnly: true },
+].map((s) => ({ ...s, hourly: (s.cpu * 0.8 + s.memory * 0.7) / 730 }));
+
+const shapeOf = (id: string) => {
+  const s = SIZES.find((x) => x.id === id);
+  if (!s) throw `unknown size ${id} (valid: small, medium, large, xlarge, max)`;
+  return s;
+};
+
+/** Prices and disk that follow from a shape, instance type and disk size. */
+const priced = (size: string, instanceType: InstanceType, diskGb: number) => ({
+  size,
+  instanceType,
+  diskGb,
+  idleMonthly: diskMonthly(diskGb),
+  hourlyRate: computeHourly(shapeOf(size), instanceType) + diskMonthly(diskGb) / 730,
+});
+
+const usage = (usedGb: number, diskGb: number): DiskUsage => ({
+  usedBytes: usedGb * 1e9,
+  totalBytes: diskGb * 1e9,
+  freeBytes: Math.max(0, diskGb - usedGb) * 1e9,
+  usedPercent: (usedGb / diskGb) * 100,
+});
+
+const asleep = (m: { idleMonthly: number }) => `Asleep · disk only, ${monthly(m.idleMonthly)}`;
+
+type Seed = Pick<MachineView, "id" | "name" | "state" | "detail" | "paired"> &
+  Partial<Omit<MachineView, "id" | "name" | "state" | "detail" | "paired">>;
+const machine = ({ size = "medium", instanceType = "default", diskGb, ...m }: Seed): MachineView => ({
+  ...priced(size, instanceType, diskGb ?? shapeOf(size).defaultDisk),
+  region: "us",
+  diskUsage: null,
+  diskWarning: false,
+  githubSignedIn: true,
   countdown: null,
   signedOut: [],
   projects: [],
@@ -47,11 +99,22 @@ const keptAwake = (endsAt: number) => ({
 
 const seedMachines: MachineView[] = [
   // first: asleep until its T3 Code sends a turn
-  machine({ id: "sb_e4d1", name: "devbox", size: "default", state: "asleep", detail: "Asleep · free", paired: true, projects: [onMachine("acme", "github.com/you/acme")] }),
+  machine({
+    id: "sb_e4d1",
+    name: "devbox",
+    size: "small",
+    state: "asleep",
+    detail: asleep({ idleMonthly: diskMonthly(12) }),
+    paired: true,
+    projects: [onMachine("acme", "github.com/you/acme")],
+    ...(params.get("disk") === "full" ? { diskUsage: usage(11.2, 12), diskWarning: true } : { diskUsage: usage(4.1, 12) }),
+  }),
   machine({
     id: "sb_7f2a",
     name: "t3-main",
-    size: "default",
+    size: "large",
+    instanceType: "vm",
+    diskUsage: usage(13.7, 20),
     state: "working",
     detail: "Working · 2 threads · 3 subagents",
     paired: true,
@@ -61,19 +124,23 @@ const seedMachines: MachineView[] = [
     id: "sb_19c0",
     name: "side-quest",
     size: "small",
+    region: "eu",
+    githubSignedIn: false,
+    diskUsage: usage(10.9, 12),
+    diskWarning: true,
     state: "idle",
     ...idle(),
     paired: true,
     signedOut: ["Claude", "Codex"],
   }),
-  machine({ id: "sb_02bb", name: "scratch", size: "small", state: "idle", detail: "Idle · not in T3 Code yet", paired: false }),
+  machine({ id: "sb_02bb", name: "scratch", size: "small", diskGb: 4, state: "idle", detail: "Idle · not in T3 Code yet", paired: false, githubSignedIn: false }),
 ];
 
 const manyExtra: MachineView[] = [
   machine({ id: "sb_aa01", name: "docs-site", size: "small", state: "waking", detail: "Waking up…", paired: true }),
-  machine({ id: "sb_aa02", name: "infra", size: "default", state: "error", detail: "Couldn't reach machine", paired: true }),
-  machine({ id: "sb_aa03", name: "old-spike", size: "small", state: "missing", detail: "Deleted on Boat", paired: true }),
-  machine({ id: "", name: "new-api", size: "default", state: "creating", detail: "Installing T3 server…", paired: false }),
+  machine({ id: "sb_aa02", name: "infra", size: "xlarge", instanceType: "performance", region: "ap-south", state: "error", detail: "Couldn't reach machine", paired: true }),
+  machine({ id: "sb_aa03", name: "old-spike", size: "small", state: "missing", detail: "Deleted on Agent37", paired: true }),
+  machine({ id: "", name: "new-api", size: "medium", state: "creating", detail: "Installing T3 server…", paired: false }),
 ];
 
 /** Machines with T3 Connect on. */
@@ -103,17 +170,28 @@ function seed(): UiState {
   return {
     setup: (params.get("setup") as Setup | null) ?? "ready",
     setupBusy: params.get("busy") === "1",
-    signInCode: params.get("busy") === "1" && params.get("setup") === "signInBoat" ? "XM22-RFXJ" : null,
+    signInCode: null,
     account: { identifier: "you@example.com", plan: "Pro" },
     machines: structuredClone(machines),
-    costs: { today: 0.42, month: 12.8, startsToday: 3, startsLimit: 50 },
-    settings: { startAtLogin: true },
+    costs: tally(
+      { today: 0.42, month: 12.8, idleMonthly: 0, walletBalance: params.get("wallet") === "low" ? 3.1 : 42.5, awakeRamGb: 0, memoryLimitGb: 32 },
+      machines,
+    ),
+    settings: { startAtLogin: true, template: "agent37-base", autoSleepFuseMinutes: 120 },
     mcp: params.get("mcp") === "mixed" ? { claudeCode: true, codex: null } : { claudeCode: false, codex: false },
-    sizes: [
-      { id: "small", spec: "2 vCPU · 4 GB", hourly: 0.018 },
-      { id: "default", spec: "4 vCPU · 8 GB", hourly: 0.036 },
-      { id: "large", spec: "8 vCPU · 16 GB", hourly: 0.072 },
-    ],
+    sizes: SIZES,
+  };
+}
+
+const AWAKE = new Set<MachineView["state"]>(["working", "idle", "waking", "sleeping"]);
+
+/** The footer's machine-wide numbers, from the machines as they are now. */
+function tally(costs: UiState["costs"], machines: MachineView[]): UiState["costs"] {
+  const live = machines.filter((m) => m.state !== "missing" && m.state !== "creating");
+  return {
+    ...costs,
+    idleMonthly: live.reduce((n, m) => n + m.idleMonthly, 0),
+    awakeRamGb: live.filter((m) => AWAKE.has(m.state)).reduce((n, m) => n + shapeOf(m.size).memory, 0),
   };
 }
 
@@ -142,6 +220,7 @@ function create(): MockBackend {
   const listeners = new Set<(s: UiState) => void>();
 
   const emit = () => {
+    state.costs = tally(state.costs, state.machines);
     state = structuredClone(state);
     listeners.forEach((l) => l(state));
   };
@@ -155,14 +234,39 @@ function create(): MockBackend {
     return m;
   };
 
-  const setupOrder: Setup[] = ["installBoat", "signInBoat", "installT3", "ready"];
+  const setupOrder: Setup[] = ["apiKey", "installT3", "ready"];
+  const nextStep = () => {
+    state.setup = setupOrder[setupOrder.indexOf(state.setup) + 1] ?? "ready";
+  };
 
   const handlers: { [C in CommandName]: (a: CommandArgs<C>) => Promise<unknown> } = {
     get_state: async () => structuredClone(state),
 
-    async create_machine({ name, size, projects }) {
+    async save_api_key({ apiKey }) {
+      await wait(900);
+      if (!apiKey.startsWith("sk_")) throw "That isn't an Agent37 API key: they start with sk_live_";
+      nextStep();
+      emit();
+    },
+
+    async create_machine({ name, size, instanceType = "default", region = "us", diskGb, projects }) {
       if (state.machines.some((m) => m.name === name)) throw `a machine called "${name}" already exists`;
-      const row = machine({ id: "", name, size, state: "creating", detail: "Creating sandbox…", paired: false });
+      const shape = shapeOf(size);
+      if (shape.vmOnly && instanceType === "default") throw `size ${size} needs instance type vm or performance`;
+      const disk = diskGb ?? shape.defaultDisk;
+      if (disk < shape.minDisk || disk > shape.maxDisk) throw `disk for ${size} must be ${shape.minDisk}–${shape.maxDisk} GB`;
+      const row = machine({
+        id: "",
+        name,
+        size,
+        instanceType,
+        region,
+        diskGb: disk,
+        githubSignedIn: false,
+        state: "creating",
+        detail: "Creating sandbox…",
+        paired: false,
+      });
       state.machines = [...state.machines, row];
       emit();
       const steps = ["Creating sandbox…", "Installing T3 server…", "Starting T3 server…", "Asking T3 Code to add it…"];
@@ -178,6 +282,7 @@ function create(): MockBackend {
               ...m,
               id,
               state: "idle",
+              diskUsage: usage(1.4, disk),
               ...idle(),
               ...(params.get("ready") === "1"
                 ? { paired: true, projects: projects?.length ? [] : [onMachine("acme", "github.com/you/acme")] }
@@ -185,7 +290,6 @@ function create(): MockBackend {
             }
           : m,
       );
-      state.costs.startsToday += 1;
       emit();
       for (const p of projects ?? []) await handlers.add_project({ id, projectId: p });
     },
@@ -217,8 +321,6 @@ function create(): MockBackend {
       patch(id, WAKING);
       await wait(2600);
       patch(id, { state: "idle", ...idle() });
-      state.costs.startsToday += 1;
-      emit();
     },
 
     async sleep_machine({ id }) {
@@ -226,7 +328,7 @@ function create(): MockBackend {
       patch(id, { state: "sleeping", detail: "Going to sleep…", countdown: null });
       await wait(1800);
       // A stop ends any keep-awake, as on a real machine.
-      patch(id, { state: "asleep", detail: "Asleep · free", keepAwakeUntil: null, keepAwakeForever: false });
+      patch(id, { state: "asleep", detail: asleep(find(id)), keepAwakeUntil: null, keepAwakeForever: false });
     },
 
     async keep_awake({ id, minutes }) {
@@ -241,17 +343,40 @@ function create(): MockBackend {
       );
     },
 
-    async resize_machine({ id, size }) {
+    async resize_machine({ id, size, diskGb }) {
       const m = find(id);
-      if (m.state === "idle") {
-        patch(id, { state: "sleeping", detail: "Moving to " + size + "…", countdown: null });
-        await wait(1600);
+      const to = size ?? m.size;
+      const shape = shapeOf(to);
+      if (shape.vmOnly && m.instanceType === "default") throw `size ${to} needs instance type vm or performance`;
+      const disk = diskGb ?? m.diskGb;
+      if (disk < m.diskGb) throw "a disk can grow, never shrink";
+      if (disk > shape.maxDisk) throw `${to} tops out at ${shape.maxDisk} GB of disk`;
+      if (m.state === "working") throw "an agent is working: it resizes once the turn ends";
+      // Agent37 recreates the container: an asleep one wakes first, the disk comes along
+      if (m.state === "asleep") {
         patch(id, WAKING);
-        await wait(2200);
-        patch(id, { size, state: "idle", ...idle() });
-      } else {
-        patch(id, { size });
+        await wait(2000);
       }
+      patch(id, { state: "waking", detail: `Recreating on ${to}${disk !== m.diskGb ? `, ${disk} GB` : ""}…`, countdown: null });
+      await wait(2200);
+      const used = m.diskUsage?.usedBytes ?? 0;
+      const grown = m.diskUsage ? usage(used / 1e9, disk) : null;
+      patch(id, {
+        ...priced(to, m.instanceType, disk),
+        diskUsage: grown,
+        diskWarning: !!grown && grown.usedPercent >= 80,
+        state: "idle",
+        ...idle(),
+      });
+    },
+
+    async sign_in_github({ id }) {
+      find(id);
+      state.signInCode = "A1B2-C3D4";
+      emit();
+      await wait(3500);
+      state.signInCode = null;
+      patch(id, { githubSignedIn: true });
     },
 
     async turn_on_connect({ id }) {
@@ -300,15 +425,21 @@ function create(): MockBackend {
     async get_machine_details({ id }): Promise<MachineDetails> {
       const m = find(id);
       await wait(350);
-      const size = state.sizes.find((s) => s.id === m.size);
       const extra = seedDetails[id] ?? { awake: 0, month: 0, days: 0 };
       const awake = extra.awake + (m.state === "working" || m.state === "idle" ? 300 : 0);
-      const costToday = (awake / 3600) * (size?.hourly ?? 0);
+      const costToday = (awake / 3600) * m.hourlyRate;
       return {
         id,
         costToday,
         costMonth: extra.month + costToday,
         awakeSecsToday: awake,
+        instanceType: m.instanceType,
+        region: m.region,
+        diskGb: m.diskGb,
+        idleMonthly: m.idleMonthly,
+        hourlyRate: m.hourlyRate,
+        diskUsage: m.diskUsage,
+        githubSignedIn: m.githubSignedIn,
         agents: ["Claude", "Codex"].map((name) => ({ name, signedIn: !m.signedOut.includes(name) })),
         t3Version: "0.0.21",
         createdAt: Math.floor(Date.now() / 1000) - extra.days * 86400,
@@ -329,13 +460,15 @@ function create(): MockBackend {
     },
 
     async setup_action({ action }) {
+      if (action === "openApiKeys") {
+        console.info("[mock] open the Agent37 dashboard's API keys page");
+        return;
+      }
       state.setupBusy = true;
       emit();
       await wait(1600);
       state.setupBusy = false;
-      if (action === "recheck" || action === state.setup) {
-        state.setup = setupOrder[setupOrder.indexOf(state.setup) + 1] ?? "ready";
-      }
+      if (action === "recheck" || action === state.setup) nextStep();
       emit();
     },
 
@@ -358,7 +491,7 @@ function create(): MockBackend {
 
   if (state.setup === "starting") {
     setTimeout(() => {
-      state.setup = "installBoat";
+      state.setup = "apiKey";
       emit();
     }, 1500);
   }
@@ -373,7 +506,6 @@ function create(): MockBackend {
       return () => listeners.delete(cb);
     },
     turn(id, stage) {
-      if (stage === "wake") state.costs.startsToday += 1;
       patch(
         id,
         stage === "wake"

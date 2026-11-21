@@ -100,11 +100,12 @@ impl MachineRuntime {
 
     /// Returns the files that could not be copied, with their reason.
     async fn clone_project(&self, project: &Project, files: Vec<(String, String)>) -> Result<Vec<String>> {
-        let (url, token) = (self.upstream_url(), self.upstream_token());
-        let config = upstream::call(&url, &token, "server.getConfig", json!({})).await?;
-        let started = upstream::call(
+        let (url, token, headers) = (self.upstream_url(), self.upstream_token(), self.edge_headers());
+        let config = upstream::call_with_headers(&url, &token, &headers, "server.getConfig", json!({})).await?;
+        let started = upstream::call_with_headers(
             &url,
             &token,
+            &headers,
             "projectClone.start",
             json!({
                 "projectId": uuid(),
@@ -121,18 +122,26 @@ impl MachineRuntime {
         let cwd = started["cwd"].as_str().unwrap_or_default().to_owned();
         self.set_adding_status(&project.repo_key, "Connecting");
 
-        let (outcome, _) = upstream::subscribe_until(&url, &token, "subscribeProjectClones", json!({}), CLONE_TIMEOUT, |clones| {
-            let clone = clones.as_array()?.iter().find(|c| c["projectId"] == project_id.as_str())?;
-            match clone["phase"].as_str()? {
-                "done" => Some(Ok(())),
-                "failed" => Some(Err(clone["error"].as_str().unwrap_or("the clone failed").to_owned())),
-                "cancelled" => Some(Err("the clone was cancelled in T3 Code".to_owned())),
-                _ => {
-                    self.set_adding_status(&project.repo_key, &progress(clone));
-                    None
+        let (outcome, _) = upstream::subscribe_until_with_headers(
+            &url,
+            &token,
+            &headers,
+            "subscribeProjectClones",
+            json!({}),
+            CLONE_TIMEOUT,
+            |clones| {
+                let clone = clones.as_array()?.iter().find(|c| c["projectId"] == project_id.as_str())?;
+                match clone["phase"].as_str()? {
+                    "done" => Some(Ok(())),
+                    "failed" => Some(Err(clone["error"].as_str().unwrap_or("the clone failed").to_owned())),
+                    "cancelled" => Some(Err("the clone was cancelled in T3 Code".to_owned())),
+                    _ => {
+                        self.set_adding_status(&project.repo_key, &progress(clone));
+                        None
+                    }
                 }
-            }
-        })
+            },
+        )
         .await?;
         match outcome {
             Some(Ok(())) => {}
@@ -143,9 +152,10 @@ impl MachineRuntime {
         let mut failed = Vec::new();
         for (path, contents) in files {
             let relative = if project.subdirectory.is_empty() { path.clone() } else { format!("{}/{path}", project.subdirectory) };
-            let written = upstream::call(
+            let written = upstream::call_with_headers(
                 &url,
                 &token,
+                &headers,
                 "projects.writeFile",
                 json!({ "cwd": cwd, "relativePath": relative, "contents": contents }),
             )
@@ -194,7 +204,7 @@ fn explain_clone_failure(e: anyhow::Error, machine: &str) -> anyhow::Error {
         .iter()
         .any(|s| text.contains(s));
     if auth {
-        anyhow::anyhow!("{text}\n{machine} uses the GitHub login of your Boat account, which has no access to this repo.")
+        anyhow::anyhow!("{text}\nSign in to GitHub on {machine} first (Machine details → GitHub → Sign in, or `sign_in_github`).")
     } else {
         e
     }

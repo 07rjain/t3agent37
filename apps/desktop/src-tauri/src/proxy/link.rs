@@ -27,8 +27,29 @@ fn step(parts: &Parts) -> Relay {
 }
 
 /// What the machine's server calls itself. The linker asks for a token for the address it
-/// knows, the proxy's, and the server only issues tokens for its own.
-fn resource(m: &MachineRuntime) -> String {
+/// knows, the proxy's, and the server only issues tokens for its own origin (which behind
+/// Agent37's edge may be the container's internal `Host`, e.g. `https://10.90.0.98:3773/mcp`).
+/// Query `t3 serve`'s RFC 9728 OAuth protected-resource metadata to discover the exact resource
+/// URI it expects, falling back to `{upstream_url}/mcp`.
+async fn resource(m: &MachineRuntime) -> String {
+    for path in ["/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-protected-resource"] {
+        let url = format!("{}{path}", m.upstream_url());
+        let res = m
+            .shared
+            .http
+            .get(url)
+            .headers(m.edge_headers())
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await;
+        if let Ok(resp) = res
+            && resp.status().is_success()
+            && let Ok(v) = resp.json::<Value>().await
+            && let Some(r) = v["resource"].as_str().filter(|s| !s.is_empty())
+        {
+            return r.to_owned();
+        }
+    }
     format!("{}/mcp", m.upstream_url())
 }
 
@@ -43,7 +64,8 @@ pub async fn decision(State(m): M, req: Request) -> Response {
     let Ok(body) = axum::body::to_bytes(body, MAX_STEP_BODY).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     };
-    let body = decision_for(&body, &resource(&m)).unwrap_or_else(|| body.to_vec());
+    let target_resource = resource(&m).await;
+    let body = decision_for(&body, &target_resource).unwrap_or_else(|| body.to_vec());
     let route = step(&parts);
     relay(&m, parts, Body::from(body), route).await
 }
@@ -75,7 +97,8 @@ pub async fn token(State(m): M, req: Request) -> Response {
     let Ok(body) = axum::body::to_bytes(body, MAX_STEP_BODY).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     };
-    let form = token_request_for(&body, &resource(&m));
+    let target_resource = resource(&m).await;
+    let form = token_request_for(&body, &target_resource);
     // The answer is read here, so it must come uncompressed.
     parts.headers.remove(header::ACCEPT_ENCODING);
     let route = step(&parts);
@@ -144,7 +167,7 @@ fn handshake(m: &Arc<MachineRuntime>, body: &[u8]) -> Option<Response> {
             let result = json!({
                 "protocolVersion": msg["params"]["protocolVersion"],
                 "capabilities": {},
-                "serverInfo": {"name": "t3boat", "version": env!("CARGO_PKG_VERSION")},
+                "serverInfo": {"name": "t3agent37", "version": env!("CARGO_PKG_VERSION")},
             });
             Some((session, Json(json!({"jsonrpc": "2.0", "id": msg["id"], "result": result}))).into_response())
         }

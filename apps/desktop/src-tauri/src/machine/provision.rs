@@ -1,7 +1,10 @@
-//! Creating and upgrading machines: everything that runs on the sandbox goes through
-//! `provision.sh`, which is idempotent.
+//! Creating and upgrading Agent37 machines: everything that runs on the sandbox goes through
+//! `provision.sh`, which is idempotent and works on both our custom `t3agent37` template and
+//! stock `agent37-base` containers (no systemd required).
 
-use crate::boat::Boat;
+use crate::agent37::{
+    self, Agent37, CreateSpec, InstanceType, Region, ShapeInfo, SHAPES,
+};
 use crate::proxy::auth::random_token;
 use crate::store::Machine;
 use anyhow::{anyhow, bail, Context, Result};
@@ -10,18 +13,35 @@ use serde::Deserialize;
 
 const PROVISION_SH: &str = include_str!("provision.sh");
 const WATCHDOG_MJS: &str = include_str!("watchdog.mjs");
-const T3_PORT: u16 = 3773;
-const WATCHDOG_PORT: u16 = 3774;
+const SUPERVISOR_MJS: &str = include_str!("../../../../../template/supervisor.mjs");
+pub const T3_PORT: u16 = 3773;
+pub const WATCHDOG_PORT: u16 = 3774;
+
+/// Re-export Agent37 shapes for UI and MCP tool schemas.
+pub type SizeInfo = ShapeInfo;
+pub const SIZES: &[SizeInfo] = SHAPES;
+
+pub fn size(id: &str) -> Result<&'static SizeInfo> {
+    agent37::shape(id)
+}
 
 /// Identifies the provisioning scripts; a machine provisioned with others gets them on wake.
 pub fn revision() -> String {
-    let hash = fnv1a(PROVISION_SH.bytes().chain(WATCHDOG_MJS.bytes()).chain(SLEEP_AFTER_SECS.to_string().bytes()));
+    let hash = fnv1a(
+        PROVISION_SH
+            .bytes()
+            .chain(WATCHDOG_MJS.bytes())
+            .chain(SUPERVISOR_MJS.bytes())
+            .chain(SLEEP_AFTER_SECS.to_string().bytes()),
+    );
     format!("{hash:016x}")
 }
 
 /// FNV-1a: stable across builds, unlike std's hasher.
 pub fn fnv1a(bytes: impl IntoIterator<Item = u8>) -> u64 {
-    bytes.into_iter().fold(0xcbf29ce484222325, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3))
+    bytes
+        .into_iter()
+        .fold(0xcbf29ce484222325, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3))
 }
 
 #[derive(Debug, Deserialize)]
@@ -31,76 +51,38 @@ pub struct Provisioned {
     pub upstream_token: Option<String>,
 }
 
-/// Machine sizes, as Boat sells them.
-#[derive(Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SizeInfo {
-    pub id: &'static str,
-    pub spec: &'static str,
-    pub hourly: f64,
-}
-
-pub const SIZES: &[SizeInfo] = &[
-    SizeInfo { id: "small", spec: "2 vCPU · 4 GB", hourly: 0.018 },
-    SizeInfo { id: "default", spec: "4 vCPU · 8 GB", hourly: 0.036 },
-    SizeInfo { id: "large", spec: "8 vCPU · 16 GB", hourly: 0.072 },
-];
-
-pub fn size(id: &str) -> Result<&'static SizeInfo> {
-    SIZES.iter().find(|s| s.id == id).ok_or_else(|| anyhow!("unknown size {id}"))
-}
-
-/// How long a machine stays up after the last agent turn and the last action through t3boat.
-/// Long enough to read a result and type a follow-up without waiting for a wake; a wake soon
-/// after is quick, as Boat usually keeps the stopped VM about 10 minutes.
+/// How long a machine stays up after the last agent turn and the last action through t3agent37.
 pub const SLEEP_AFTER_SECS: u64 = 180;
 
-/// The machine's sandbox, as Boat lists it.
-pub fn sandbox_name(name: &str) -> String {
-    format!("t3boat · {name}")
-}
-
-/// The saved snapshot replaced at every sleep. Boat deletes a stopped sandbox's
-/// disk after 14 days; this stays, so the machine can be restored from it. Unique per machine,
-/// whoever else uses the Boat account. Boat takes lowercase letters, digits and dashes.
-pub fn snapshot_name(name: &str, machine_id: &str) -> String {
-    let id: String = machine_id.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
-    format!("t3boat-{name}-{id}")
-}
-
-/// Copies the scripts over as a file (the watchdog secret must not appear in any command line)
-/// and runs `provision.sh`.
+/// Uploads the provisioning bundle (`provision.sh`, `watchdog.mjs`, `supervisor.mjs`) without
+/// leaking the watchdog secret into any command line, and runs `provision.sh`.
 pub async fn run(
-    boat: &Boat,
-    sandbox_id: &str,
+    agent37: &Agent37,
+    instance_id: &str,
     name: &str,
     t3_version: &str,
     watchdog_secret: &str,
-    snapshot: &str,
     mint_upstream_token: bool,
 ) -> Result<Provisioned> {
     let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
     let script = format!(
         "set -e; d=$(mktemp -d); trap 'rm -rf \"$d\" \"$0\"' EXIT\n\
-         echo {p} | base64 -d > \"$d/provision.sh\"; echo {w} | base64 -d > \"$d/watchdog.mjs\"\n\
-         T3BOAT_SECRET={s} bash \"$d/provision.sh\" {v} {sleep} {snapshot} {mint} {name}\n",
+         echo {p} | base64 -d > \"$d/provision.sh\"\n\
+         echo {w} | base64 -d > \"$d/watchdog.mjs\"\n\
+         echo {sup} | base64 -d > \"$d/supervisor.mjs\"\n\
+         T3BOAT_SECRET={s} bash \"$d/provision.sh\" {v} {sleep} {mint} {name}\n",
         p = b64(PROVISION_SH),
         w = b64(WATCHDOG_MJS),
+        sup = b64(SUPERVISOR_MJS),
         v = shell_word(t3_version)?,
         s = shell_word(watchdog_secret)?,
         sleep = SLEEP_AFTER_SECS,
-        snapshot = shell_word(snapshot)?,
         mint = u8::from(mint_upstream_token),
         name = shell_word(name)?,
     );
-    let name = format!("t3boat-provision-{}.sh", random_token());
-    let local = std::env::temp_dir().join(&name);
-    crate::store::write_private(&local, script.as_bytes())?;
-    let remote = format!("/tmp/{name}");
-    let uploaded = boat.upload(sandbox_id, &local, &remote).await;
-    let _ = std::fs::remove_file(&local);
-    uploaded?;
-    let out = boat.exec_ok(sandbox_id, &format!("bash {remote}"), 600).await?;
+    let remote = format!("/tmp/t3agent37-provision-{}.sh", random_token());
+    agent37.upload_small(instance_id, script.as_bytes(), &remote).await?;
+    let out = agent37.exec_ok(instance_id, &format!("bash {remote}"), 600).await?;
     let line = out
         .lines()
         .rev()
@@ -109,48 +91,88 @@ pub async fn run(
     Ok(serde_json::from_str(line)?)
 }
 
-/// Only `[A-Za-z0-9._-]` reaches the remote shell.
+/// Ensures the lightweight supervisor is running after a cold-storage / fresh boot on stock
+/// `agent37-base` instances whose container entrypoint didn't start `supervisor.mjs`.
+pub async fn ensure_supervisor_running(agent37: &Agent37, instance_id: &str) -> Result<()> {
+    let script = r#"
+        set -e
+        dir="$HOME/.t3agent37"
+        pidfile="$dir/supervisor.pid"
+        if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile" 2>/dev/null)" 2>/dev/null; then
+            exit 0
+        fi
+        if [ -f "$dir/supervisor.mjs" ]; then
+            nohup node --no-warnings --max-old-space-size=64 "$dir/supervisor.mjs" >> "$dir/supervisor.log" 2>&1 </dev/null &
+        fi
+    "#;
+    agent37.exec_ok(instance_id, script, 30).await?;
+    Ok(())
+}
+
+/// Only non-empty `[A-Za-z0-9._-]` reaches the remote shell.
 fn shell_word(s: &str) -> Result<&str> {
-    if !s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+    if s.is_empty() || !s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
         bail!("unsafe value for the remote shell: {s}");
     }
     Ok(s)
 }
 
-/// Hosts the T3 server's and the watchdog's ports publicly: their URLs, in that order.
-/// Idempotent: hosting again keeps the URLs.
-pub async fn host(boat: &Boat, sandbox_id: &str) -> Result<(String, String)> {
-    tokio::try_join!(boat.host_public(sandbox_id, T3_PORT), boat.host_public(sandbox_id, WATCHDOG_PORT))
-}
-
-/// Creates a new machine end to end. Takes about a minute, most of it Boat and the T3 install.
-/// On failure after `created`, the caller deletes the sandbox.
+#[allow(clippy::too_many_arguments)]
 pub async fn create(
-    boat: &Boat,
+    agent37: &Agent37,
     name: &str,
-    size: &str,
+    size_id: &str,
+    instance_type: InstanceType,
+    region: Region,
+    disk_gb: Option<u32>,
+    template: &str,
+    auto_sleep_fuse_minutes: Option<u32>,
     t3_version: &str,
     local_port: u16,
     created: impl FnOnce(&str),
     progress: impl Fn(&str),
 ) -> Result<Machine> {
-    self::size(size)?;
-    progress("Creating sandbox on Boat");
-    let id = boat
-        .create(&sandbox_name(name), size, None)
+    let shape = agent37::shape(size_id)?;
+    let resources = agent37::validate_shape_and_disk(instance_type, shape.id, disk_gb)?;
+    progress("Creating instance on Agent37");
+    let spec = CreateSpec {
+        template: template.to_owned(),
+        instance_type,
+        region,
+        resources,
+        auto_sleep: auto_sleep_fuse_minutes.is_some(),
+        idle_timeout_seconds: auto_sleep_fuse_minutes.map(|m| m.saturating_mul(60)),
+    };
+    let inst = agent37
+        .create_raw(&spec)
         .await
-        .context("creating the Boat sandbox")?;
+        .context("creating the Agent37 instance")?;
+    let id = inst.id.clone();
+    // Register with the orphan reaper IMMEDIATELY before waiting for boot so a failed/timed-out
+    // readiness poll never leaks a billable instance.
     created(&id);
+    if !inst.is_running() {
+        agent37
+            .wait_until_running(&id)
+            .await
+            .context("waiting for Agent37 instance to reach running")?;
+    }
+
     progress("Installing T3 Code");
     let secret = random_token();
-    let provisioned = run(boat, &id, name, t3_version, &secret, &snapshot_name(name, &id), true).await?;
-    progress("Opening the machine's address");
-    let (upstream_url, watchdog_url) = host(boat, &id).await?;
+    let provisioned = run(agent37, &id, name, t3_version, &secret, true).await?;
+
+    let upstream_url = agent37.preview_url(&id, T3_PORT);
+    let watchdog_url = agent37.preview_url(&id, WATCHDOG_PORT);
     Ok(Machine {
         id: id.clone(),
         sandbox_id: id,
         name: name.to_owned(),
-        size: size.to_owned(),
+        size: shape.id.to_owned(),
+        instance_type,
+        region,
+        disk_gb: resources.disk,
+        template: template.to_owned(),
         upstream_url,
         upstream_token: provisioned
             .upstream_token
@@ -166,6 +188,6 @@ pub async fn create(
         created_at: chrono::Utc::now().timestamp(),
         next_due_at: None,
         connect: false,
-        saved_stop: None,
+        github_signed_in: false,
     })
 }

@@ -1,6 +1,20 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { MachineView, Size } from "../types";
-import { ACTIONS, machineKey, menuActions, needsProject, primaryAction, seedOf, signInTo, type Action, type MenuItem } from "../machine";
+import {
+  ACTIONS,
+  growDisk,
+  hourly,
+  instanceLabel,
+  machineKey,
+  menuActions,
+  monthly,
+  needsProject,
+  primaryAction,
+  seedOf,
+  signInTo,
+  type Action,
+  type MenuItem,
+} from "../machine";
 import { AgentName, AgentNames } from "./AgentLogos";
 import { BoatIcon } from "./BoatIcon";
 import { DeleteErrorNote, Dots, useArmed, useDetail } from "./common";
@@ -34,6 +48,7 @@ export function MachineRow({
   const primary = primaryAction(m);
   const detail = useDetail(m);
   const extra = menuActions(m, sizes);
+  const grow = m.diskWarning ? growDisk(m, sizes) : null;
   const [armed, arm] = useArmed(); // two-step confirm for the primary "Remove"
   // "Add a project…" picks from T3 Code's projects in the details view
   const menuAction = (a: MenuItem) => ("kind" in a ? onOpen?.(true) : onAction(a));
@@ -67,6 +82,13 @@ export function MachineRow({
             <span className="row-name">{m.name}</span>
           )}
           <span className="chip">{m.size}</span>
+          <span
+            className="row-spec"
+            title={`${instanceLabel(m.instanceType)} in ${m.region} · ${m.diskGb} GB disk · ${hourly(m.hourlyRate)} awake · ${monthly(m.idleMonthly)} asleep`}
+          >
+            {m.instanceType === "default" ? "" : `${instanceLabel(m.instanceType)} · `}
+            {m.region} · {m.diskGb} GB
+          </span>
         </div>
         <div className="row-detail" title={detail}>
           {detail}
@@ -112,6 +134,18 @@ export function MachineRow({
           <button className="btn btn-link" onClick={() => onOpen(true)}>
             Add one
           </button>
+        </div>
+      ) : null}
+      {m.id && m.diskWarning ? (
+        <div className="row-note is-warn">
+          <span className="row-note-text">
+            Disk {m.diskUsage ? `${Math.round(m.diskUsage.usedPercent)}% ` : ""}full
+          </span>
+          {grow ? (
+            <button className="btn btn-link" disabled={!!pending} onClick={() => onAction(grow)}>
+              {grow.label}
+            </button>
+          ) : null}
         </div>
       ) : null}
       {m.projects

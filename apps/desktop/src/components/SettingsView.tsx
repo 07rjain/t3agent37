@@ -10,6 +10,17 @@ const CLIENTS: { id: McpClient; name: string }[] = [
   { id: "codex", name: "Codex" },
 ];
 
+const DEFAULT_TEMPLATE = "agent37-base";
+
+/** Laptop-closed fuse choices, in minutes; null = off. */
+const FUSES: { minutes: number | null; label: string }[] = [
+  { minutes: null, label: "Off" },
+  { minutes: 30, label: "30m" },
+  { minutes: 60, label: "1h" },
+  { minutes: 120, label: "2h" },
+  { minutes: 240, label: "4h" },
+];
+
 interface Props {
   state: UiState;
   onSave: (s: Settings) => void;
@@ -42,12 +53,22 @@ export function SettingsView({ state, onSave, onAddMcp, onQuit, onBack }: Props)
     onSave(next);
   };
 
+  // saved on blur or Enter, not on every keystroke
+  const [template, setTemplate] = useState(state.settings.template);
+  useEffect(() => setTemplate(state.settings.template), [state.settings.template]);
+  const saveTemplate = () => {
+    const t = template.trim() || DEFAULT_TEMPLATE;
+    setTemplate(t);
+    if (t !== s.template) change({ template: t });
+  };
+
   return (
     <div className="view">
       <SubHeader title="Settings" onBack={onBack} />
       <div className="view-body settings">
         <p className="hint">
-          Machines sleep 3 minutes after their agents finish and wake by themselves when you use them in T3 Code.
+          Machines sleep 3 minutes after their agents finish and wake by themselves when you use them in T3 Code. Asleep,
+          only their disk bills.
         </p>
         <label className="setting setting-row">
           <span className="setting-name">Start at login</span>
@@ -60,9 +81,48 @@ export function SettingsView({ state, onSave, onAddMcp, onQuit, onBack }: Props)
           />
         </label>
         <div className="setting">
+          <span className="caption">laptop closed</span>
+          <span className="setting-name">Sleep every machine after</span>
+          <div className="segmented" role="radiogroup" aria-label="Sleep every machine after this long without this computer">
+            {FUSES.map((f) => (
+              <button
+                key={f.label}
+                role="radio"
+                aria-checked={s.autoSleepFuseMinutes === f.minutes}
+                className={s.autoSleepFuseMinutes === f.minutes ? "is-on" : undefined}
+                onClick={() => change({ autoSleepFuseMinutes: f.minutes })}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+          <span className="hint">
+            A fuse against runaway bills when this computer closes or goes offline. A long turn that runs on with no
+            word from here may be checkpointed to sleep, then resumes when you're back.
+          </span>
+        </div>
+        <div className="setting">
+          <label className="caption" htmlFor="template">
+            template
+          </label>
+          <span className="prompt-input prompt-input-sm">
+            <input
+              id="template"
+              value={template}
+              placeholder={DEFAULT_TEMPLATE}
+              spellCheck={false}
+              autoComplete="off"
+              onChange={(e) => setTemplate(e.target.value)}
+              onBlur={saveTemplate}
+              onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+            />
+          </span>
+          <span className="hint">New machines start from it · a custom t3agent37 template works too</span>
+        </div>
+        <div className="setting">
           <span className="caption">mcp</span>
           <span className="setting-name">
-            Let <AgentNames names={CLIENTS.map((c) => c.name)} /> control t3boat
+            Let <AgentNames names={CLIENTS.map((c) => c.name)} /> control t3agent37
           </span>
           <div className="mcp-buttons">
             {CLIENTS.map((c) => {
@@ -107,17 +167,20 @@ export function SettingsView({ state, onSave, onAddMcp, onQuit, onBack }: Props)
         </div>
       </div>
       <div className="view-foot settings-foot">
-        <span className="setting-value" title="Boat account">
-          {email && (
-            <button className="account-email" onClick={() => setShowEmail((v) => !v)}>
-              {showEmail ? email : "Show email"}
-            </button>
-          )}
+        <span className="setting-value" title="Agent37 account">
+          {email &&
+            (email.includes("@") ? (
+              <button className="account-email" onClick={() => setShowEmail((v) => !v)}>
+                {showEmail ? email : "Show email"}
+              </button>
+            ) : (
+              email
+            ))}
           {email && plan && " · "}
           {plan}
         </span>
         <button className="btn btn-sm btn-quiet" onClick={onQuit}>
-          Quit t3boat
+          Quit t3agent37
         </button>
       </div>
     </div>

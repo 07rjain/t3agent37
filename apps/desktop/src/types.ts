@@ -1,6 +1,13 @@
 // Mirrors docs/ui-contract.md exactly.
 
-export type Setup = "starting" | "ready" | "installBoat" | "signInBoat" | "installT3";
+export type Setup = "starting" | "ready" | "apiKey" | "installT3";
+
+export type SetupAction = "installT3" | "recheck" | "openApiKeys";
+
+/** Agent37 instance type: `default` container, `vm` full VM with Docker, `performance` dedicated VM. */
+export type InstanceType = "default" | "vm" | "performance";
+
+export type Region = "us" | "eu" | "ap-south";
 
 export type MachineState =
   | "working"
@@ -13,10 +20,30 @@ export type MachineState =
   | "missing"
   | "unknown";
 
+export interface DiskUsage {
+  usedBytes: number;
+  totalBytes: number;
+  freeBytes: number;
+  usedPercent: number;
+}
+
 export interface MachineView {
   id: string;
   name: string;
   size: string;
+  instanceType: InstanceType;
+  region: Region;
+  diskGb: number;
+  /** disk cost per month: billed awake or asleep, until deleted */
+  idleMonthly: number;
+  /** what an awake hour costs, compute and disk */
+  hourlyRate: number;
+  /** as last seen; null until measured */
+  diskUsage: DiskUsage | null;
+  /** the disk is nearly full: growing it is the fix */
+  diskWarning: boolean;
+  /** GitHub is signed in there, so private repos clone */
+  githubSignedIn: boolean;
   state: MachineState;
   detail: string;
   countdown: Countdown | null; // set while `detail` counts down
@@ -29,10 +56,10 @@ export interface MachineView {
 }
 
 export interface MachineProject {
-  id: string; // T3's project id on the machine; while t3boat adds it, the local project's id
+  id: string; // T3's project id on the machine; while t3agent37 adds it, the local project's id
   title: string;
   repoKey: string | null; // T3's repository key: the same repo has it on every machine
-  status: string | null; // set while t3boat adds it: clone progress as T3 Code words it
+  status: string | null; // set while t3agent37 adds it: clone progress as T3 Code words it
 }
 
 /** A T3 Code project on this computer that can go to a machine (it has a git remote). */
@@ -52,24 +79,48 @@ export interface Countdown {
 
 export interface Settings {
   startAtLogin: boolean;
+  /** Agent37 template new machines start from */
+  template: string;
+  /** sleeps every machine after this long with no word from this computer; null = off */
+  autoSleepFuseMinutes: number | null;
 }
 
+/** An Agent37 compute shape. */
 export interface Size {
   id: string;
   spec: string;
+  cpu: number;
+  memory: number; // GB
+  minDisk: number; // GB
+  maxDisk: number; // GB
+  defaultDisk: number; // GB
+  /** compute per awake hour on a `default` container; other instance types multiply it */
   hourly: number;
+  /** needs instance type `vm` or `performance` */
+  vmOnly: boolean;
 }
 
 export type McpClient = "claudeCode" | "codex";
 
+export interface Costs {
+  today: number;
+  month: number;
+  /** every machine's disk per month: the floor while all sleep */
+  idleMonthly: number;
+  walletBalance: number;
+  /** memory of the machines awake now, against the workspace's limit */
+  awakeRamGb: number;
+  memoryLimitGb: number;
+}
+
 export interface UiState {
   setup: Setup;
   setupBusy: boolean;
-  /** while a Boat sign-in waits: the code its page may ask for */
+  /** while a GitHub device sign-in waits: the code its page asks for */
   signInCode: string | null;
   account: { identifier: string | null; plan: string | null } | null;
   machines: MachineView[];
-  costs: { today: number; month: number; startsToday: number; startsLimit: number };
+  costs: Costs;
   settings: Settings;
   sizes: Size[];
   /** null = that CLI isn't installed */
@@ -86,13 +137,22 @@ export interface MachineDetails {
   createdAt: number; // unix secs
   /** T3 Connect is on: the user's other devices reach it with their T3 account */
   connect: boolean;
+  instanceType: InstanceType;
+  region: Region;
+  diskGb: number;
+  idleMonthly: number;
+  hourlyRate: number;
+  diskUsage: DiskUsage | null;
+  githubSignedIn: boolean;
 }
-
-export type SetupAction = "installBoat" | "signInBoat" | "installT3" | "recheck";
 
 export interface Commands {
   get_state: [undefined, UiState];
-  create_machine: [{ name: string; size: string; projects?: string[] }, void]; // projects: LocalProject ids to add once up
+  save_api_key: [{ apiKey: string }, void]; // stays on this computer, never on a machine
+  create_machine: [
+    { name: string; size: string; instanceType?: InstanceType; region?: Region; diskGb?: number; projects?: string[] },
+    void,
+  ]; // projects: LocalProject ids to add once up
   local_projects: [undefined, LocalProject[]]; // pinned first, then most recent
   add_project: [{ id: string; projectId: string }, void]; // resolves once cloned
   wake_machine: [{ id: string }, void];
@@ -100,9 +160,10 @@ export interface Commands {
   open_machine: [{ id: string; thread?: string }, void];
   pair_machine: [{ id: string }, void];
   delete_machine: [{ id: string; discard?: boolean }, void];
-  resize_machine: [{ id: string; size: string }, void];
+  resize_machine: [{ id: string; size?: string; diskGb?: number }, void]; // disk only grows
   keep_awake: [{ id: string; minutes: number | null }, void]; // null: until stopped; 0: stop
   sign_in_agent: [{ id: string; agent: string }, void];
+  sign_in_github: [{ id: string; token?: string }, void]; // no token: browser device login
   turn_on_connect: [{ id: string }, void]; // resolves once reachable, after the browser sign-in
   latest_thread: [{ id: string }, string | null]; // thread id
   get_machine_details: [{ id: string }, MachineDetails];
