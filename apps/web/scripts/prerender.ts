@@ -1,14 +1,13 @@
 // After `vite build`: fills dist/index.html with the prerendered site, writes its markdown twin
-// (index.md) plus llms.txt and llms-full.txt for agents, and the Vercel routes that serve the twin
-// to agents at `/`. Vercel reads vercel.json from the repo, so commit it when it changes.
+// (index.md) plus llms.txt and llms-full.txt for agents, and updates vercel.json.
 import { htmlToMarkdown, llmsFullTxt, llmsTxt, vercelRoutes } from "@usenotra/agentside/build";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 
-const SITE = "https://t3boat.paukraft.com";
-const TITLE = "t3boat";
+const SITE = "https://07rjain.github.io/t3agent37";
+const TITLE = "t3agent37";
 const DESCRIPTION =
-  "Run your T3 Code agents in the cloud, on your own Boat subscription. Machines sleep when idle, so you only pay for the minutes your agents run.";
+  "Run your T3 Code agents on pay-as-you-go Agent37 containers and VMs. Edge-authenticated localhost proxy, CRIU checkpoint sleep, live Web UI, and MCP server.";
 
 const web = join(import.meta.dir, "..");
 const dist = join(web, "dist");
@@ -16,7 +15,8 @@ const ssr = join(web, "dist-ssr");
 
 const { render } = await import(join(ssr, "prerender.js"));
 await rm(ssr, { recursive: true });
-const root = `<div id="root">${render()}</div>`;
+const rendered = render().replaceAll('="/assets/', '="./assets/');
+const root = `<div id="root">${rendered}</div>`;
 
 const index = Bun.file(join(dist, "index.html"));
 const html = await index.text();

@@ -11,7 +11,7 @@ import { BoatIcon } from "@t3boat/desktop/components/BoatIcon";
 import { useAnimation } from "@t3boat/desktop/pixel/clock";
 import { seedOf, stateTag } from "@t3boat/desktop/machine";
 import type { MachineState } from "@t3boat/desktop/types";
-import { BoatLogo, T3CodeMark } from "./logos";
+import { Agent37Mark, T3CodeMark } from "./logos";
 
 const MACHINES = ["devbox", "beebox", "toybox", "jukebox"] as const;
 type Name = (typeof MACHINES)[number];
@@ -297,7 +297,7 @@ export function Relay() {
 
       <div ref={map} className="relay-map" data-ai-ignore>
         <div className="relay-laptop">
-          <span className="relay-where">your laptop</span>
+          <span className="relay-where">your laptop or VPS</span>
 
           <div ref={t3} className="relay-t3">
             <span className="relay-name" role="img" aria-label="T3 Code">
@@ -317,7 +317,7 @@ export function Relay() {
           <div className="relay-hub">
             <img ref={hub} src={icon} alt="" width={56} height={56} />
             <span className="relay-held" data-on={held || undefined} />
-            <span className="relay-name">t3boat</span>
+            <span className="relay-name">t3agent37</span>
             <span key={doing} className="relay-doing" data-on={doing ? "" : undefined}>
               {doing}
             </span>
@@ -326,7 +326,10 @@ export function Relay() {
 
         <div ref={cloud} className="relay-cloud">
           <span className="relay-where">
-            <BoatLogo role="img" aria-label="Boat" />
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--fg)", fontWeight: 600 }}>
+              <Agent37Mark aria-hidden />
+              Agent37
+            </span>
           </span>
           <ul>
             {MACHINES.map((m) => (

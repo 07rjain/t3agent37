@@ -182,7 +182,7 @@ export function Thread({
   return (
     <div className="t3">
       <iframe
-        src="/t3code/index.html"
+        src="t3code/index.html"
         title="T3 Code"
         loading="lazy"
         onLoad={(e) => setWin(e.currentTarget.contentWindow ?? undefined)}

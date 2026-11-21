@@ -24,6 +24,16 @@ export function BoatLogo(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+/** Agent37 geometric badge mark ("37" in a rounded square frame, drawn in currentColor). */
+export function Agent37Mark(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 92 64" fill="currentColor" {...props}>
+      <path d="M8 2h76a6 6 0 0 1 6 6v48a6 6 0 0 1-6 6H8a6 6 0 0 1-6-6V8a6 6 0 0 1 6-6Zm0 7v46h76V9H8Z" />
+      <path d="M16 20h24v7.5L29.5 34H34c4.8 0 8.5 3.1 8.5 8 0 5.4-4.5 9-11.5 9-5.2 0-9.6-1.5-13-4l3.5-6.2c2.4 1.8 5.5 3 8.8 3 2.9 0 4.6-1.1 4.6-2.9 0-1.8-1.6-2.8-4.7-2.8h-5.8v-6.2L31.4 26H16V20Zm32 0h28v6.8L61.2 50h-9.4L65.4 27H48V20Z" />
+    </svg>
+  );
+}
+
 /** GitHub's mark. */
 export function GitHubMark(props: SVGProps<SVGSVGElement>) {
   return (

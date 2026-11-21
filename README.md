@@ -1,5 +1,11 @@
 # t3agent37
 
+<p>
+  <a href="https://07rjain.github.io/t3agent37/">Website &amp; Interactive Demo</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="apps/desktop/docs/architecture.md">How it works</a>
+</p>
+
 Auto-sleeping [T3 Code](https://t3.codes) remote machines on [Agent37](https://www.agent37.com), forked from [paukraft/t3boat](https://github.com/paukraft/t3boat).
 
 Create isolated cloud containers or VMs on your Agent37 wallet, pair them into T3 Code through an edge-authenticated localhost proxy, and let them CRIU-checkpoint to sleep when idle so compute billing drops to `$0/hr` (retaining persistent disk at `$0.09/GB/mo` until deleted).

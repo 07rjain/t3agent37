@@ -2,11 +2,11 @@ import { useEffect, useState } from "react";
 import { REPO } from "./links";
 import { track } from "./analytics";
 
-const PROMPT = `Please build and install t3boat (${REPO}) on my computer: clone it, follow the Install section of its README, and open the app when it's done.`;
+const PROMPT = `Please build and install t3agent37 (${REPO}) on my machine: clone it, follow the Quick start section of its README (building the headless daemon or desktop app), and start it when done.`;
 
 const LABELS = { idle: "Let your agent install it", copied: "Prompt copied. Paste it", failed: "Couldn't copy" };
 
-/** Copies a prompt that has the user's coding agent build and install t3boat. */
+/** Copies a prompt that has the user's coding agent build and install t3agent37. */
 export function InstallButton() {
   const [state, setState] = useState<keyof typeof LABELS>("idle");
 
@@ -24,7 +24,6 @@ export function InstallButton() {
     );
   };
 
-  // both labels stay laid out, so the button keeps its width while they cross-fade
   return (
     <button className="install" data-state={state} onClick={copy} type="button" aria-label={LABELS[state]}>
       <svg className="install-icon" viewBox="0 0 16 16" aria-hidden>

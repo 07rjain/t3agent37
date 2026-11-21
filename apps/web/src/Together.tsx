@@ -49,7 +49,7 @@ function phaseOf(machine: MachineView | undefined, picker: Picker, stage: Stage)
   // under its status line
   const status = { at: ".row-detail", x: 0.3, y: 1 };
   if (machine.state === "creating" || !machine.paired)
-    return { look: "app", spots: [{ ...status, text: "t3boat creates the machine on Boat, sets everything up, and connects it to T3 Code." }] };
+    return { look: "app", spots: [{ ...status, text: "t3agent37 creates the container on Agent37, installs T3 Code + agents, and links it." }] };
   const { name } = machine;
   if (stage === "unsent" && picker.selectedId !== name)
     return {
@@ -205,8 +205,8 @@ export function Together() {
 
         <div className="pane-app">
           <iframe
-            src="/demo.html?machines=0&ready=1"
-            title="t3boat demo"
+            src="demo.html?machines=0&ready=1"
+            title="t3agent37 demo"
             width={380}
             height={560}
             loading="lazy"
