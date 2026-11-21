@@ -1,7 +1,7 @@
 # t3agent37
 
 <p>
-  <a href="https://07rjain.github.io/t3agent37/">Website &amp; Interactive Demo</a> ·
+  <a href="https://t3agent37.subdomain.wtf/">Website &amp; Interactive Demo</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="apps/desktop/docs/architecture.md">How it works</a>
 </p>

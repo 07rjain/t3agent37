@@ -21,7 +21,7 @@ interface Spot {
 }
 
 /** The visitor's machine: typed into the new-machine form over the name it suggests. */
-const NAME = "beebox";
+const NAME = "mi6-dev";
 /** The new-machine form's launch button. */
 const LAUNCH = ".view-foot button[type=submit]";
 

@@ -1,135 +1,169 @@
-// The hero: the app's pixel sea, full bleed, drawn by the app's own engine. Nav and copy sit
-// on plain sky; the sky's gradient, the horizon and the boats come below them.
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { useAnimation, useTheme } from "@t3boat/desktop/pixel/clock";
-import { drawBoat, poseFor } from "@t3boat/desktop/pixel/boat";
-import { palettes } from "@t3boat/desktop/pixel/palette";
-import { Px } from "@t3boat/desktop/pixel/px";
-import { drawScene, HORIZON, SEA, type Rect } from "@t3boat/desktop/pixel/scene";
-import { seedOf, stateTag } from "@t3boat/desktop/machine";
-import type { MachineState } from "@t3boat/desktop/types";
+// Full-bleed James Bond 007 gun-barrel ASCII art hero for t3agent37.
+// Decodes the 14fps pre-encoded ASCII frames from bondAscii.ts onto a high-DPI canvas with
+// subtle CRT scanlines, radial obsidian vignette, and live Agent37 dossier telemetry badges.
+import { useEffect, useRef, type ReactNode } from "react";
+import { BOND_FPS, BOND_H, BOND_RLE, BOND_W, decodeBondFrame } from "./bondAscii";
 
-/** Left to right; `depth` is the waterline between horizon (0) and the hero's bottom (1), `room` how far it sails. */
-// the first two sail on narrow screens
-const FLEET: { key: string; state: MachineState; depth: number; room: number }[] = [
-  { key: "t3-main", state: "working", depth: 0.5, room: 14 },
-  { key: "side-quest", state: "working", depth: 0.72, room: 10 },
-  { key: "big-refactor", state: "asleep", depth: 0.36, room: 0 },
-  { key: "docs", state: "waking", depth: 0.62, room: 0 },
-  { key: "scratch", state: "asleep", depth: 0.44, room: 0 },
-];
-/** Scene px each boat needs; a narrower sea carries fewer. */
-const SLOT = 68;
-/** Scene px the scene's layout (drawn for the app's 190 px strip) spreads over. */
-const LAYOUT_W = 175;
-/** Share of the sky's gradient, from its top, that is still plain sky in the light theme. */
-const PLAIN = 0.45;
-/** The sea zooms out this much more than the sky: a short band of sky, deep water. */
-const SEA_PER_SKY = 2;
+const FRAMES = BOND_RLE.map(decodeBondFrame);
+// Frames around Bond's turn & fire where a subtle crimson reticle tint pulses.
+const FIRE_START = 34;
+const FIRE_END = 46;
 
-/** CSS px per scene px: twice the app's. */
-const PIXEL = 4;
+const DOSSIER = [
+  { code: "01", name: "mi6-dev", state: "working", meta: "2 vCPU · 4 GB" },
+  { code: "02", name: "q-lab", state: "asleep", meta: "CRIU · $0.36/mo" },
+  { code: "03", name: "skyfall", state: "waking", meta: "restoring 3.5s" },
+  { code: "04", name: "spectre", state: "idle", meta: "sleeps in 3m" },
+] as const;
 
-/** What `el` shows: its box if it paints one, else its lines' text and inline boxes, not the wider block around them. */
-function inkRects(el: Element): DOMRect[] {
-  const style = getComputedStyle(el);
-  const paints = style.backgroundColor !== "rgba(0, 0, 0, 0)" || parseFloat(style.borderTopWidth) > 0;
-  if (paints) return [el.getBoundingClientRect()];
-  const range = document.createRange();
-  range.selectNodeContents(el);
-  return [...range.getClientRects()].filter((r) => r.width > 0 && r.height > 0);
-}
-
-/** `nav` and the copy (`children`) sit on plain sky; the scene fills the hero below them. */
 export function Hero({ nav, children }: { nav: ReactNode; children: ReactNode }) {
   const box = useRef<HTMLElement>(null);
-  const navBox = useRef<HTMLElement>(null);
-  const copy = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
-  const buffer = useRef<Px | null>(null);
-  const tags = useRef(new Map<string, HTMLSpanElement>());
-  /** hero size and where the copy ends, in CSS px; the text blocks, in scene px */
-  const [layout, setLayout] = useState({ w: 0, h: 0, copy: 0, text: [] as Rect[] });
-  const theme = useTheme();
 
-  useLayoutEffect(() => {
-    const el = box.current!;
-    const measure = () => {
-      const origin = el.getBoundingClientRect();
-      const text = [...navBox.current!.children, ...copy.current!.children].flatMap(inkRects).map((r) => ({
-        x0: Math.floor((r.left - origin.left) / PIXEL),
-        y0: Math.floor((r.top - origin.top) / PIXEL),
-        x1: Math.ceil((r.right - origin.left) / PIXEL),
-        y1: Math.ceil((r.bottom - origin.top) / PIXEL),
-      }));
-      setLayout({ w: el.clientWidth, h: el.clientHeight, copy: copy.current!.offsetTop + copy.current!.offsetHeight, text });
+  useEffect(() => {
+    const el = box.current;
+    const cv = canvas.current;
+    if (!el || !cv) return;
+    const ctx = cv.getContext("2d");
+    if (!ctx) return;
+
+    const reduced = matchMedia("(prefers-reduced-motion: reduce)");
+    let width = 0;
+    let height = 0;
+    let dpr = 1;
+
+    const resize = () => {
+      dpr = Math.min(window.devicePixelRatio || 1, 2);
+      width = el.clientWidth;
+      height = el.clientHeight;
+      cv.width = Math.max(1, Math.floor(width * dpr));
+      cv.height = Math.max(1, Math.floor(height * dpr));
+      cv.style.width = `${width}px`;
+      cv.style.height = `${height}px`;
     };
-    const ro = new ResizeObserver(measure);
+
+    const drawFrame = (frameIdx: number) => {
+      if (!width || !height) return;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // Obsidian noir backdrop
+      ctx.fillStyle = "#07080b";
+      ctx.fillRect(0, 0, width, height);
+
+      // Fit the 116x42 ASCII matrix cleanly across the hero (biased slightly right on wide screens
+      // so the rifled gun barrel & walking silhouette frame the headline dramatically).
+      const charAspect = 0.6;
+      const cellByH = height / BOND_H;
+      const cellByW = width / (BOND_W * charAspect);
+      const cellH = Math.max(cellByH, cellByW * 0.92);
+      const cellW = cellH * charAspect;
+      const totalW = BOND_W * cellW;
+      const totalH = BOND_H * cellH;
+      const offsetX = width >= 900 ? width - totalW * 0.88 : (width - totalW) / 2;
+      const offsetY = (height - totalH) / 2;
+
+      const fontSize = Math.max(8, cellH * 1.02);
+      ctx.font = `500 ${fontSize.toFixed(1)}px "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace`;
+      ctx.textBaseline = "top";
+
+      const frame = FRAMES[frameIdx % FRAMES.length];
+      const firing = frameIdx >= FIRE_START && frameIdx <= FIRE_END;
+
+      // Render row by row with subtle intensity gradient
+      for (let y = 0; y < BOND_H; y++) {
+        const py = offsetY + y * cellH;
+        if (py + cellH < 0 || py > height) continue;
+        const row = frame.slice(y * BOND_W, (y + 1) * BOND_W);
+        // Subtle 007 crimson tint during the turn-and-fire frames
+        ctx.fillStyle = firing ? "rgba(248, 196, 196, 0.72)" : "rgba(228, 232, 240, 0.62)";
+        ctx.fillText(row, offsetX, py);
+      }
+
+      // Subtle crimson muzzle aura during turn/fire
+      if (firing) {
+        const cx = offsetX + totalW * 0.62;
+        const cy = offsetY + totalH * 0.52;
+        const pulse = ctx.createRadialGradient(cx, cy, 4, cx, cy, Math.max(width, height) * 0.42);
+        pulse.addColorStop(0, "rgba(220, 38, 38, 0.22)");
+        pulse.addColorStop(0.5, "rgba(220, 38, 38, 0.06)");
+        pulse.addColorStop(1, "rgba(7, 8, 11, 0)");
+        ctx.fillStyle = pulse;
+        ctx.fillRect(0, 0, width, height);
+      }
+
+      // Left-to-right noir gradient veil so hero headline & CTA stay razor-legible
+      const leftVeil = ctx.createLinearGradient(0, 0, width * 0.78, 0);
+      leftVeil.addColorStop(0, "rgba(7, 8, 11, 0.92)");
+      leftVeil.addColorStop(0.45, "rgba(7, 8, 11, 0.72)");
+      leftVeil.addColorStop(1, "rgba(7, 8, 11, 0.16)");
+      ctx.fillStyle = leftVeil;
+      ctx.fillRect(0, 0, width, height);
+
+      // Top & bottom edge vignettes
+      const vertVeil = ctx.createLinearGradient(0, 0, 0, height);
+      vertVeil.addColorStop(0, "rgba(7, 8, 11, 0.65)");
+      vertVeil.addColorStop(0.2, "rgba(7, 8, 11, 0)");
+      vertVeil.addColorStop(0.8, "rgba(7, 8, 11, 0)");
+      vertVeil.addColorStop(1, "rgba(7, 8, 11, 0.94)");
+      ctx.fillStyle = vertVeil;
+      ctx.fillRect(0, 0, width, height);
+    };
+
+    resize();
+    const ro = new ResizeObserver(() => {
+      resize();
+      if (reduced.matches) drawFrame(38);
+    });
     ro.observe(el);
-    ro.observe(copy.current!);
-    // line boxes move once the web fonts land
-    document.fonts.ready.then(measure);
-    return () => ro.disconnect();
+
+    let raf = 0;
+    let lastIdx = -1;
+    const startMs = performance.now();
+
+    const tick = (now: number) => {
+      if (reduced.matches) {
+        if (lastIdx !== 38) {
+          lastIdx = 38;
+          drawFrame(38);
+        }
+        return;
+      }
+      const idx = Math.floor(((now - startMs) / 1000) * BOND_FPS) % FRAMES.length;
+      if (idx !== lastIdx) {
+        lastIdx = idx;
+        drawFrame(idx);
+      }
+      raf = requestAnimationFrame(tick);
+    };
+
+    if (reduced.matches) {
+      drawFrame(38);
+    } else {
+      raf = requestAnimationFrame(tick);
+    }
+
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
   }, []);
 
-  const s = PIXEL;
-  const w = Math.ceil(layout.w / s);
-  const h = Math.ceil(layout.h / s);
-  // the scene fills what the copy leaves, its plain share of sky behind the copy's last rows
-  const zoom = (h - layout.copy / s) / ((1 - PLAIN) * HORIZON + SEA_PER_SKY * SEA);
-  const band = Math.round(HORIZON * zoom);
-  const horizon = h - Math.round(SEA_PER_SKY * SEA * zoom);
-  const fleet = FLEET.slice(0, Math.max(2, Math.min(FLEET.length, Math.floor(w / SLOT))));
-
-  useAnimation(
-    (t) => {
-      const ctx = canvas.current?.getContext("2d");
-      if (!ctx || !w || !h) return;
-      if (buffer.current?.w !== w || buffer.current.h !== h) buffer.current = new Px(w, h);
-      const px = buffer.current;
-      const pal = palettes[theme];
-      const time = t ?? 0;
-      const at = { x: w / LAYOUT_W, sky: zoom, sea: SEA_PER_SKY * zoom, top: horizon - band };
-      drawScene(px, at, pal, theme, time, layout.text);
-      // back row first so nearer boats overlap farther ones
-      const boats = fleet.map((b, i) => ({
-        ...b,
-        cx: Math.round((w * (i + 0.5)) / fleet.length),
-        wy: Math.round(horizon + b.depth * (h - horizon)),
-      }));
-      boats.sort((a, z) => a.wy - z.wy);
-      for (const b of boats) {
-        const top = drawBoat(px, b.cx, b.wy, pal, poseFor(b.state, t, seedOf(b.key), b.room), time);
-        const tag = tags.current.get(b.key);
-        if (tag) tag.style.transform = `translate(${top.x * s}px, ${(top.y - 1) * s}px) translate(-50%, -100%)`;
-      }
-      px.blit(ctx);
-    },
-    [theme, layout, fleet.length],
-  );
-
   return (
-    <header ref={box} className="hero">
-      <div className="sea" aria-hidden>
-        <canvas ref={canvas} width={w} height={h} style={{ width: w * s, height: h * s }} />
-        {fleet.map((b) => (
-          <span
-            key={b.key}
-            ref={(el) => {
-              if (el) tags.current.set(b.key, el);
-              else tags.current.delete(b.key);
-            }}
-            className={`sea-tag is-${b.state}`}
-          >
-            {stateTag(b.state)}
+    <header ref={box} className="hero hero-bond">
+      <div className="bond-stage" aria-hidden>
+        <canvas ref={canvas} />
+        <div className="bond-scanlines" />
+      </div>
+      <nav className="nav">{nav}</nav>
+      <div className="hero-copy">{children}</div>
+      <div className="bond-dossier" aria-hidden data-ai-ignore>
+        {DOSSIER.map((d) => (
+          <span key={d.code} className={`dossier-chip is-${d.state}`}>
+            <i className="dossier-dot" />
+            <span className="dossier-code">{d.code}</span>
+            <span className="dossier-name">{d.name}</span>
+            <span className="dossier-meta">{d.meta}</span>
           </span>
         ))}
-      </div>
-      <nav ref={navBox} className="nav">
-        {nav}
-      </nav>
-      <div ref={copy} className="hero-copy">
-        {children}
       </div>
     </header>
   );

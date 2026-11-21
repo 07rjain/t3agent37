@@ -1,4 +1,4 @@
-export const SITE = "https://07rjain.github.io/t3agent37";
+export const SITE = "https://t3agent37.subdomain.wtf";
 export const REPO = "https://github.com/07rjain/t3agent37";
 export const T3CODE = "https://t3.codes";
 export const AGENT37 = "https://www.agent37.com";

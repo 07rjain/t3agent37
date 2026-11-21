@@ -1,27 +1,16 @@
-// Under the hood: T3 Code talks only to t3boat on the laptop, which fans out to the machines on
-// Boat. T3 Code sees every machine online; behind t3boat most sleep. Messages keep coming for
-// random sleeping machines: each lands on t3boat, which holds it, wakes that machine, then hands
-// it over; the agent works a while, then the machine dozes off. Work runs long or short, so one
-// machine may still be busy while the next is woken, and now and then a message goes to a busy
-// machine, straight through t3boat. Wires and packets are drawn over the laid-out page,
-// measured, so the same picture works across or down the screen.
+// Under the hood: T3 Code talks only to t3agent37 on your laptop or VPS, which fans out behind
+// edge auth (X-Agent37-Key) to Agent37 cloud sandboxes. T3 Code sees every machine online;
+// behind t3agent37 most sleep in CRIU checkpoints. Messages wake each box on demand.
 import { useLayoutEffect, useRef, useState } from "react";
-import icon from "@t3boat/desktop/icon.png";
-import { BoatIcon } from "@t3boat/desktop/components/BoatIcon";
 import { useAnimation } from "@t3boat/desktop/pixel/clock";
-import { seedOf, stateTag } from "@t3boat/desktop/machine";
+import { stateTag } from "@t3boat/desktop/machine";
 import type { MachineState } from "@t3boat/desktop/types";
 import { Agent37Mark, T3CodeMark } from "./logos";
 
-const MACHINES = ["devbox", "beebox", "toybox", "jukebox"] as const;
+const MACHINES = ["mi6-dev", "q-lab", "spectre", "skyfall"] as const;
 type Name = (typeof MACHINES)[number];
-/** A wire: T3 Code to t3boat, or t3boat to a machine. */
 type Link = "t3" | Name;
 
-/**
- * A message for a sleeping machine, from second `at`: it reaches t3boat, which holds it, wakes
- * the machine, then passes it on; the agent works for `work` seconds, then the machine dozes off.
- */
 interface Job {
   kind: "job";
   name: Name;
@@ -29,7 +18,6 @@ interface Job {
   work: number;
 }
 
-/** A message for a machine already working: t3boat passes it straight on, no waking. */
 interface Nudge {
   kind: "nudge";
   name: Name;
@@ -38,30 +26,22 @@ interface Nudge {
 
 type Message = Job | Nudge;
 
-/** Each step of a job, in seconds from its start. The machine starts waking the moment it lands. */
 const LANDS = 1.2;
-const PASSES = 5.7;
-const WORKS = 6.9;
+const PASSES = 4.8;
+const WORKS = 6.0;
 const IDLE = 3;
-const DOZE = 3;
-/** A nudge: to t3boat, then straight on to the machine. */
+const DOZE = 2.6;
 const NUDGED = 2 * LANDS;
-/** How often a message goes to a machine already working, when one is. */
 const NUDGE_ODDS = 0.4;
 
 const endOf = (m: Message) => (m.kind === "job" ? m.at + WORKS + m.work + IDLE + DOZE : m.at + NUDGED);
-/** Until t3boat is free again: the next message comes no sooner. */
 const hubBusy = (m: Message) => (m.kind === "job" ? WORKS : NUDGED);
 const between = (lo: number, hi: number) => lo + Math.random() * (hi - lo);
 const pick = <T,>(xs: T[]) => xs[Math.floor(Math.random() * xs.length)];
 
-/**
- * The next message after `messages`, a few seconds on: now and then for a machine still working
- * when it arrives, which then works on a while longer; otherwise for one asleep by then.
- */
 function nextMessage(messages: Message[]): Message {
   const last = messages[messages.length - 1];
-  let at = last.at + hubBusy(last) + between(1, 6);
+  let at = last.at + hubBusy(last) + between(1, 5);
   const jobs = messages.filter((m): m is Job => m.kind === "job");
   const working = jobs.filter((j) => j.at + WORKS <= at && at + NUDGED + 1 < j.at + WORKS + j.work);
   if (working.length && Math.random() < NUDGE_ODDS) {
@@ -71,12 +51,11 @@ function nextMessage(messages: Message[]): Message {
   }
   for (;;) {
     const free = MACHINES.filter((m) => m !== last.name && jobs.every((j) => j.name !== m || endOf(j) <= at));
-    if (free.length) return { kind: "job", name: pick(free), at, work: between(5, 20) };
+    if (free.length) return { kind: "job", name: pick(free), at, work: between(5, 18) };
     at += 1;
   }
 }
 
-/** Already under way when the map comes on screen: one machine working, the next message on its way. */
 function firstMessages(): Message[] {
   return [{ kind: "job", name: pick([...MACHINES]), at: -WORKS - 1, work: between(10, 16) }];
 }
@@ -91,7 +70,6 @@ function stateIn(j: Job, s: number): MachineState {
   return "sleeping";
 }
 
-/** What shows at second `s`: each machine's state, t3boat's label, and whether it holds a message. */
 interface Scene {
   states: Record<Name, MachineState>;
   doing: string;
@@ -117,7 +95,6 @@ function sceneAt(messages: Message[], s: number): Scene {
 const sameScene = (a: Scene, b: Scene) =>
   a.doing === b.doing && a.held === b.held && MACHINES.every((m) => a.states[m] === b.states[m]);
 
-/** Something on a wire: `out` runs from T3 Code's side, `in` back towards it. */
 interface Packet {
   link: Link;
   at: number;
@@ -136,7 +113,6 @@ function packetsOf(j: Message): Packet[] {
     { link: "t3", at: j.at, dur: LANDS, dir: "out" },
     { link: j.name, at: j.at + PASSES, dur: WORKS - PASSES, dir: "out" },
   ];
-  // the agent's work streaming back to T3 Code
   for (let at = j.at + WORKS + 0.3; at < j.at + WORKS + j.work - 1; at += 2) {
     out.push({ link: j.name, at, dur: 1.4, dir: "in", kind: "reply" });
     out.push({ link: "t3", at: at + 1.4, dur: 1, dir: "in", kind: "reply" });
@@ -144,19 +120,14 @@ function packetsOf(j: Message): Packet[] {
   return out;
 }
 
-/** For reduced motion: one machine working, nothing moving. */
 const STILL: Scene = {
-  states: { devbox: "working", beebox: "asleep", toybox: "asleep", jukebox: "asleep" },
+  states: { "mi6-dev": "working", "q-lab": "asleep", spectre: "asleep", skyfall: "asleep" },
   doing: "",
   held: false,
 };
 
 type Point = [number, number];
 
-/**
- * A right-angled path from `a`'s box to `b`'s: across if `b` is beside `a`, else down. `level`:
- * straight from `a`'s side wherever it faces `b`'s middle, rather than from `a`'s middle.
- */
 function elbow(a: DOMRect, b: DOMRect, gap: number, level = false): Point[] {
   if (b.left >= a.right) {
     const y1 = b.top + b.height / 2;
@@ -172,10 +143,6 @@ function elbow(a: DOMRect, b: DOMRect, gap: number, level = false): Point[] {
   return [[x0, y0], [x0, mid], [x1, mid], [x1, y1]];
 }
 
-/**
- * Down from `a` into a list of rows below it: across the gap above `region` to a spine at the
- * rows' left, down the spine, then into row `b`.
- */
 function spine(a: DOMRect, b: DOMRect, region: DOMRect, gap: number): Point[] {
   const x0 = a.left + a.width / 2;
   const y = b.top + b.height / 2;
@@ -184,7 +151,6 @@ function spine(a: DOMRect, b: DOMRect, region: DOMRect, gap: number): Point[] {
   return [[x0, a.bottom + gap], [x0, mid], [x, mid], [x, y], [b.left - gap, y]];
 }
 
-/** The point `f` of the way along `path`. */
 function along(path: Point[], f: number): Point {
   const legs = path.slice(1).map((p, i) => Math.hypot(p[0] - path[i][0], p[1] - path[i][1]));
   let left = f * legs.reduce((a, b) => a + b, 0);
@@ -198,21 +164,34 @@ function along(path: Point[], f: number): Point {
   return path[0];
 }
 
-/** CSS px a packet snaps to, for the pixel look. */
 const SNAP = 2;
+
+/** Monochrome Agent37 aperture/crosshair status emblem replacing pixel boats. */
+function AgentAperture({ state }: { state: MachineState }) {
+  return (
+    <span className={`agent-aperture is-${state}`} aria-hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
+        <circle cx="12" cy="12" r="9" />
+        <line x1="12" y1="1.5" x2="12" y2="5.5" />
+        <line x1="12" y1="18.5" x2="12" y2="22.5" />
+        <line x1="1.5" y1="12" x2="5.5" y2="12" />
+        <line x1="18.5" y1="12" x2="22.5" y2="12" />
+        <circle cx="12" cy="12" r="2.6" fill="currentColor" stroke="none" />
+      </svg>
+    </span>
+  );
+}
 
 export function Relay() {
   const map = useRef<HTMLDivElement>(null);
   const t3 = useRef<HTMLDivElement>(null);
-  const hub = useRef<HTMLImageElement>(null);
+  const hub = useRef<HTMLDivElement>(null);
   const cloud = useRef<HTMLDivElement>(null);
-  const boats = useRef(new Map<Name, HTMLElement>());
+  const nodes = useRef(new Map<Name, HTMLElement>());
   const packets = useRef<SVGGElement>(null);
   const [paths, setPaths] = useState<Partial<Record<Link, Point[]>>>({});
   const [scene, setScene] = useState(STILL);
-  /** messages from just before now on, made up as time goes */
   const messages = useRef(firstMessages());
-  /** the clock reading the messages started at, once the map came on screen */
   const start = useRef<number | null>(null);
 
   useLayoutEffect(() => {
@@ -223,13 +202,11 @@ export function Relay() {
         const r = n.getBoundingClientRect();
         return new DOMRect(r.left - o.left, r.top - o.top, r.width, r.height);
       };
-      // t3boat's wires leave from its icon across to the machines, or from under its label down to them
       const icon = rel(hub.current!);
       const whole = rel(hub.current!.parentElement!);
       const region = rel(cloud.current!);
       const across = region.left >= whole.right;
-      const rows = new Map(MACHINES.map((m) => [m, rel(boats.current.get(m)!)]));
-      // the line through t3boat runs level with the machine row nearest its middle, if one faces it
+      const rows = new Map(MACHINES.map((m) => [m, rel(nodes.current.get(m)!)]));
       const middle = icon.top + icon.height / 2;
       const facing = [...rows.values()]
         .map((r) => r.top + r.height / 2)
@@ -267,7 +244,6 @@ export function Relay() {
         const s = start.current === null ? 0 : t - start.current;
         let list = messages.current;
         while (list[list.length - 1].at < s) list.push(nextMessage(list));
-        // keep the last, which the next message follows on from
         list = messages.current = list.filter((j, i) => endOf(j) > s || i === list.length - 1);
         const next = sceneAt(list, s);
         setScene((prev) => (sameScene(prev, next) ? prev : next));
@@ -293,7 +269,7 @@ export function Relay() {
   return (
     <section className="relay">
       <p className="eyebrow">Under the hood</p>
-      <h2>Run agents on several machines at once. Each one wakes when a message comes in.</h2>
+      <h2>Run agents on several sandboxes at once. Each one wakes from CRIU when a message arrives.</h2>
 
       <div ref={map} className="relay-map" data-ai-ignore>
         <div className="relay-laptop">
@@ -315,7 +291,9 @@ export function Relay() {
           </div>
 
           <div className="relay-hub">
-            <img ref={hub} src={icon} alt="" width={56} height={56} />
+            <div ref={hub} className="hub-emblem" aria-hidden>
+              <span>37</span>
+            </div>
             <span className="relay-held" data-on={held || undefined} />
             <span className="relay-name">t3agent37</span>
             <span key={doing} className="relay-doing" data-on={doing ? "" : undefined}>
@@ -336,11 +314,11 @@ export function Relay() {
               <li
                 key={m}
                 ref={(el) => {
-                  if (el) boats.current.set(m, el);
+                  if (el) nodes.current.set(m, el);
                 }}
                 data-state={state(m)}
               >
-                <BoatIcon state={state(m)} seed={seedOf(m)} />
+                <AgentAperture state={state(m)} />
                 <span className="relay-vm-name">{m}</span>
                 <span className="relay-tag">{stateTag(state(m))}</span>
               </li>
@@ -349,7 +327,6 @@ export function Relay() {
         </div>
 
         <svg className="relay-wires" aria-hidden>
-          {/* the machines' wires share their first stretch: live ones drawn last, over the dashed; a waking machine's pulses */}
           {(Object.entries(paths) as [Link, Point[]][])
             .map(([link, path]) => ({ link, path, live: link === "t3" || state(link) !== "asleep" }))
             .sort((a, b) => Number(a.live) - Number(b.live))

@@ -4,7 +4,7 @@ import { htmlToMarkdown, llmsFullTxt, llmsTxt, vercelRoutes } from "@usenotra/ag
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 
-const SITE = "https://07rjain.github.io/t3agent37";
+const SITE = "https://t3agent37.subdomain.wtf";
 const TITLE = "t3agent37";
 const DESCRIPTION =
   "Run your T3 Code agents on pay-as-you-go Agent37 containers and VMs. Edge-authenticated localhost proxy, CRIU checkpoint sleep, live Web UI, and MCP server.";

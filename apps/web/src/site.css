@@ -968,7 +968,214 @@ a.needs-logo:hover {
 @media (prefers-reduced-motion: reduce) {
   .note *,
   .ring,
-  .stage-badge::before {
+  .stage-badge::before,
+  .agent-aperture.is-working svg,
+  .agent-aperture.is-waking svg {
     animation: none !important;
   }
 }
+
+/* ── Agent37 007 Noir & ASCII Gun-Barrel Theme ──────── */
+
+:root {
+  --bg: #08090d;
+  --fg: #f4f4f5;
+  --muted: #9ca3af;
+  --panel: #11131a;
+  --line: #232734;
+  --frame: #272c3a;
+  --shadow: #000000;
+  --ocean: #dc2626;
+  --blue-500: #b91c1c;
+  --wash: #f4f4f5;
+  --accent-text: #f87171;
+  --tag-bg: rgba(244, 244, 245, 0.94);
+  --tag-fg: #090b10;
+  --tag-dim-bg: rgba(255, 255, 255, 0.08);
+  --tag-dim-fg: #a1a1aa;
+}
+
+.hero-bond {
+  --hero-shadow: #7f1d1d;
+  background: #07080b;
+  min-height: min(90svh, 840px);
+  padding-bottom: 120px;
+  border-bottom: 1px solid #1f2430;
+}
+
+.bond-stage {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: #07080b;
+}
+
+.bond-stage canvas {
+  display: block;
+}
+
+.bond-scanlines {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.028) 0px,
+    rgba(255, 255, 255, 0.028) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+.wordmark-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1.5px solid #dc2626;
+  background: #0b0d13;
+  color: #f4f4f5;
+  font: 700 16px/1 var(--font-mono);
+  letter-spacing: -0.04em;
+}
+
+.hero-kicker {
+  margin-bottom: 18px !important;
+  font: 500 12px/1 var(--font-mono) !important;
+  letter-spacing: 0.14em;
+  color: #f87171 !important;
+}
+
+.h1-a37 {
+  color: #f4f4f5;
+}
+
+.hero-bond .nav-links .nav-btn {
+  background: #f4f4f5;
+  color: #090b10;
+}
+.hero-bond .nav-links .nav-btn:hover {
+  background: #ffffff;
+  color: #090b10;
+}
+
+.hero-bond .install {
+  --install-bg: #dc2626;
+  --install-hover: #ef4444;
+  --install-fg: #ffffff;
+  --install-shadow: 4px 4px 0 #450a0a;
+}
+
+.bond-dossier {
+  position: relative;
+  width: min(1160px, 100% - 48px);
+  margin: clamp(32px, 6svh, 64px) auto 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.dossier-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 11px;
+  background: rgba(12, 14, 20, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(6px);
+  font: 400 12px/1 var(--font-mono);
+  color: #e4e4e7;
+}
+
+.dossier-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #71717a;
+}
+.dossier-chip.is-working .dossier-dot {
+  background: #10b981;
+  box-shadow: 0 0 8px #10b981;
+}
+.dossier-chip.is-waking .dossier-dot {
+  background: #ef4444;
+  box-shadow: 0 0 8px #ef4444;
+}
+.dossier-chip.is-idle .dossier-dot {
+  background: #f59e0b;
+}
+.dossier-code {
+  color: #f87171;
+  font-weight: 600;
+}
+.dossier-name {
+  font-weight: 600;
+  color: #fafafa;
+}
+.dossier-meta {
+  color: #9ca3af;
+}
+
+/* Under-the-hood Agent37 hub & spy aperture emblems */
+.hub-emblem {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  background: #0d1017;
+  border: 2px solid #dc2626;
+  box-shadow: 4px 4px 0 #450a0a;
+  color: #f4f4f5;
+  font: 700 22px/1 var(--font-mono);
+  letter-spacing: -0.04em;
+}
+
+.agent-aperture {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  color: #71717a;
+}
+.agent-aperture svg {
+  width: 22px;
+  height: 22px;
+}
+.agent-aperture.is-working {
+  color: #10b981;
+}
+.agent-aperture.is-working svg {
+  animation: aperture-spin 6s linear infinite;
+}
+.agent-aperture.is-waking {
+  color: #ef4444;
+}
+.agent-aperture.is-waking svg {
+  animation: aperture-pulse 0.9s ease-in-out infinite alternate;
+}
+.agent-aperture.is-idle {
+  color: #e4e4e7;
+}
+.agent-aperture.is-sleeping {
+  color: #f59e0b;
+}
+
+@keyframes aperture-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes aperture-pulse {
+  from {
+    opacity: 0.45;
+    transform: scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+}
+

@@ -1,4 +1,3 @@
-import icon from "@t3boat/desktop/icon.png";
 import { Together } from "./Together";
 import { Hero } from "./Hero";
 import { Relay } from "./Relay";
@@ -6,7 +5,6 @@ import { InstallButton } from "./InstallButton";
 import { Agent37Mark, AppleMark, GitHubMark, LinuxMark, T3CodeMark, WindowsMark } from "./logos";
 import { AGENT37, CREATOR, REPO, T3CODE, UPSTREAM } from "./links";
 
-/** The systems t3agent37 runs on, as their marks. */
 function OsMarks({ className }: { className: string }) {
   return (
     <span className={className} role="img" aria-label="macOS, Windows and Linux">
@@ -17,10 +15,14 @@ function OsMarks({ className }: { className: string }) {
   );
 }
 
-function Wordmark({ withIcon = false }: { withIcon?: boolean }) {
+function Wordmark({ withBadge = false }: { withBadge?: boolean }) {
   return (
     <a className="wordmark" href="./">
-      {withIcon && <img src={icon} alt="" width={40} height={40} />}
+      {withBadge && (
+        <span className="wordmark-badge" aria-hidden>
+          37
+        </span>
+      )}
       t3agent37
     </a>
   );
@@ -32,7 +34,7 @@ export function Site() {
       <Hero
         nav={
           <>
-            <Wordmark />
+            <Wordmark withBadge />
             <div className="nav-links">
               <a href="#how-it-works">How it works</a>
               <a className="nav-btn" href={REPO}>
@@ -43,7 +45,7 @@ export function Site() {
           </>
         }
       >
-        {/* data-ai-content: what agents read in place of the marks (scripts/prerender.ts) */}
+        <p className="hero-kicker">AGENT37 · EDGE-AUTHENTICATED CLOUD SANDBOXES</p>
         <h1 data-ai-content="# Run your T3 Code agents in the cloud, on Agent37">
           Run your{" "}
           <span className="h1-t3" role="img" aria-label="T3 Code">
@@ -51,13 +53,13 @@ export function Site() {
             Code
           </span>{" "}
           agents in the cloud, on{" "}
-          <span className="h1-t3" role="img" aria-label="Agent37">
+          <span className="h1-t3 h1-a37" role="img" aria-label="Agent37">
             <Agent37Mark aria-hidden />
             Agent37
           </span>
         </h1>
         <p>
-          t3agent37 creates pay-as-you-go Agent37 containers and VMs, pairs them into T3 Code behind edge auth, and
+          t3agent37 spins up pay-as-you-go Agent37 containers and VMs, pairs them into T3 Code behind edge auth, and
           CRIU-checkpoints them to sleep when idle.
         </p>
         <div className="hero-cta">
@@ -98,7 +100,7 @@ export function Site() {
 
       <footer className="footer">
         <div className="footer-main" data-ai-ignore>
-          <Wordmark withIcon />
+          <Wordmark withBadge />
           <nav className="footer-links" aria-label="Elsewhere">
             <a href={T3CODE} aria-label="T3 Code">
               <T3CodeMark className="footer-t3" aria-hidden />
