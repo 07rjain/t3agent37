@@ -220,13 +220,13 @@ export const monthly = (n: number) => `${money(n)}/mo`;
 
 export const sizeOf = (sizes: Size[], id: string) => sizes.find((s) => s.id === id);
 
-const NAMES = ["skiff", "dinghy", "sloop", "ketch", "yawl", "cutter", "dory", "schooner", "clipper", "catboat", "junk", "brig"];
+const NAMES = ["mi6-dev", "q-lab", "skyfall", "spectre", "vesper", "casino", "goldfinger", "moonraker", "moneypenny", "thunderball"];
 
 export function suggestName(taken: string[]): string {
   const used = new Set(taken);
   const free = NAMES.find((n) => !used.has(n));
   if (free) return free;
-  for (let i = 2; ; i++) if (!used.has(`skiff-${i}`)) return `skiff-${i}`;
+  for (let i = 2; ; i++) if (!used.has(`agent-${i}`)) return `agent-${i}`;
 }
 
 export const NAME_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;

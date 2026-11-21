@@ -67,10 +67,11 @@
 }
 
 .boat-icon {
-  display: block;
-  width: 48px;
-  height: 42px;
-  image-rendering: pixelated;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
 }
 
 .row-text {

@@ -1,4 +1,4 @@
-/* t3boat brand: fonts and color tokens. Shared with apps/web. */
+/* t3agent37 brand: 007 Noir obsidian, crisp silver, and crimson accent. Shared with apps/web. */
 
 @import "@fontsource-variable/inter";
 @import "@fontsource-variable/funnel-display";
@@ -6,36 +6,36 @@
 @import "@fontsource/ibm-plex-mono/500.css";
 
 :root {
-  --wash: #fefefe;
-  --ink: #060606;
-  --ocean: #263fa9;
-  --blue-50: #f1f3f9;
-  --blue-100: #e0e3f2;
-  --blue-200: #c2c9e6;
-  --blue-300: #929fd3;
-  --blue-400: #6b7cc4;
-  --blue-500: #495eb7;
-  --navy-700: #1d2a6b;
-  --navy-800: #182358;
-  --navy-900: #131c45;
-  --navy-950: #0f1634;
+  --wash: #f4f4f5;
+  --ink: #07080b;
+  --ocean: #dc2626;
+  --blue-50: #141720;
+  --blue-100: #1c202c;
+  --blue-200: #272c3b;
+  --blue-300: #9ca3af;
+  --blue-400: #525866;
+  --blue-500: #ef4444;
+  --navy-700: #181b24;
+  --navy-800: #11141c;
+  --navy-900: #0d0f16;
+  --navy-950: #090b10;
 
-  --bg: var(--wash);
-  --fg: var(--ink);
-  --muted: #565e80;
-  --line: var(--blue-100);
-  --frame: var(--blue-400);
-  --panel: var(--blue-50);
-  --accent: var(--ocean);
-  --accent-fg: #fff;
-  --accent-strong: #1d2f86;
-  --accent-text: var(--ocean);
-  --danger: #c8372b;
-  --shadow: var(--blue-200);
-  --tag-bg: var(--wash);
-  --tag-fg: var(--ink);
-  --tag-dim-bg: var(--blue-200);
-  --tag-dim-fg: var(--navy-700);
+  --bg: var(--navy-950);
+  --fg: #f4f4f5;
+  --muted: #9ca3af;
+  --line: #202431;
+  --frame: #32384a;
+  --panel: var(--navy-800);
+  --accent: #f4f4f5;
+  --accent-fg: #090b10;
+  --accent-strong: #ffffff;
+  --accent-text: #f87171;
+  --danger: #ef4444;
+  --shadow: #000000;
+  --tag-bg: #f4f4f5;
+  --tag-fg: #090b10;
+  --tag-dim-bg: #181c26;
+  --tag-dim-fg: #9ca3af;
 
   --font-display: "Funnel Display Variable", "Funnel Display", system-ui, sans-serif;
   --font-body: "Inter Variable", Inter, system-ui, sans-serif;
@@ -43,27 +43,5 @@
 
   --ocean-ease: 220ms cubic-bezier(0.3, 0.7, 0.4, 1);
 
-  color-scheme: light;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: var(--navy-950);
-    --fg: #eef0f8;
-    --muted: var(--blue-300);
-    --line: #1f2b66;
-    --frame: #3a4c9e;
-    --panel: var(--navy-900);
-    --accent: var(--blue-100);
-    --accent-fg: var(--ocean);
-    --accent-strong: var(--wash);
-    --accent-text: #a9b5ec;
-    --danger: #ff7a62;
-    --shadow: #080c22;
-    --tag-bg: var(--blue-100);
-    --tag-fg: var(--navy-950);
-    --tag-dim-bg: var(--navy-800);
-    --tag-dim-fg: var(--blue-300);
-    color-scheme: dark;
-  }
+  color-scheme: dark;
 }

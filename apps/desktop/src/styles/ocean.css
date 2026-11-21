@@ -1,17 +1,19 @@
-/* ── ocean strip ─────────────────────────────────────── */
+/* ── Agent37 007 gun-barrel ASCII strip & aperture badges ─── */
 
 .ocean {
   position: relative;
   flex: none;
-  width: 380px;
-  height: 148px;
+  width: 100%;
+  height: 144px;
   overflow: hidden;
+  border-bottom: 1px solid var(--line);
+  background: #07080b;
   transition: height var(--ocean-ease);
 }
 .ocean.is-compact {
-  height: 100px;
+  height: 86px;
 }
-/* sky overlays ride the sky: compact crops 48px off the top, so they slide out with it */
+
 .ocean .brand {
   transition:
     transform var(--ocean-ease),
@@ -30,98 +32,110 @@
   visibility: hidden;
 }
 
-/* scrolls sideways once the boats outgrow the zoomed-out sea */
-.ocean-scroll {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  overscroll-behavior-x: contain;
-}
-.ocean-scroll.is-scrolling {
-  overflow-x: auto;
-}
-/* a slim square bar on the page-coloured bottom edge, not the platform's chunky one */
-.ocean-scroll::-webkit-scrollbar {
-  height: 5px;
-}
-.ocean-scroll::-webkit-scrollbar-track {
-  background: transparent;
-}
-.ocean-scroll::-webkit-scrollbar-thumb {
-  background: var(--blue-300);
-}
-.ocean-scroll::-webkit-scrollbar-thumb:hover {
-  background: var(--blue-200);
-}
-/* the world hangs from the bottom so compact mode crops the sky */
-.ocean-world {
-  position: absolute;
-  left: 0;
-  bottom: 0;
-}
-.ocean-canvas,
-.ocean-tags,
-.ocean-hits {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-}
 .ocean-canvas {
+  position: absolute;
+  inset: 0;
   display: block;
-  image-rendering: pixelated;
-}
-.ocean-tags {
-  pointer-events: none;
 }
 
-.tag {
+.ocean-scanlines {
   position: absolute;
-  left: 0;
-  top: 0;
-  padding: 2px 4px 1px;
-  font: 400 10px/1 var(--font-mono);
-  white-space: nowrap;
-  background: var(--tag-bg);
-  color: var(--tag-fg);
-  will-change: transform;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.03) 0px,
+    rgba(255, 255, 255, 0.03) 1px,
+    transparent 1px,
+    transparent 3px
+  );
 }
-.tag-asleep,
-.tag-missing,
-.tag-unknown {
-  background: var(--tag-dim-bg);
-  color: var(--tag-dim-fg);
-  letter-spacing: 0.06em;
+
+/* tactical agent pills along the bottom of the gun-barrel header */
+.agent-strip {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 10px;
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
-.tag-error {
-  background: var(--danger);
-  color: #fff;
+.agent-strip::-webkit-scrollbar {
+  display: none;
 }
-.tag.is-active {
-  z-index: 1;
-  background: var(--ink);
-  color: var(--wash);
-  letter-spacing: 0;
+
+.agent-pill {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: rgba(11, 13, 19, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  font: 400 10.5px/1 var(--font-mono);
+  color: #e4e4e7;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+button.agent-pill {
+  cursor: pointer;
+}
+button.agent-pill:hover,
+.agent-pill.is-active {
+  border-color: #dc2626;
+  background: rgba(24, 15, 18, 0.96);
+}
+
+.agent-pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #71717a;
+}
+.agent-pill.is-working .agent-pill-dot {
+  background: #10b981;
+  box-shadow: 0 0 6px #10b981;
+}
+.agent-pill.is-waking .agent-pill-dot,
+.agent-pill.is-creating .agent-pill-dot {
+  background: #ef4444;
+  box-shadow: 0 0 6px #ef4444;
+}
+.agent-pill.is-idle .agent-pill-dot {
+  background: #e4e4e7;
+}
+.agent-pill.is-sleeping .agent-pill-dot {
+  background: #f59e0b;
+}
+.agent-pill.is-error .agent-pill-dot {
+  background: #ef4444;
+}
+
+.agent-pill-name {
+  font-weight: 500;
+  color: #f4f4f5;
+}
+.agent-pill-state {
+  color: #9ca3af;
 }
 
 .brand {
   position: absolute;
   top: 12px;
-  left: 16px;
+  left: 14px;
   display: flex;
-  flex-direction: column;
-  gap: 3px;
+  align-items: center;
+  gap: 6px;
   color: #fff;
   pointer-events: none;
 }
-/* A faint dark backing and a hard pixel shadow lift the name off the sky without a plate. */
 .brand-name {
-  margin: -4px -6px;
-  padding: 4px 6px;
-  font: 600 21px/1 var(--font-display);
+  padding: 3px 6px;
+  font: 600 20px/1 var(--font-display);
   letter-spacing: -0.02em;
-  background: rgb(6 10 30 / 0.28);
-  text-shadow: 1px 1px 0 rgb(6 10 30 / 0.6);
+  background: rgba(7, 8, 11, 0.72);
+  border-left: 2px solid #dc2626;
 }
 
 .btn-on-sea {
@@ -129,9 +143,74 @@
   top: 10px;
   right: 12px;
   color: #fff;
-  border-color: rgb(255 255 255 / 0.45);
+  border-color: rgba(255, 255, 255, 0.25);
+  background: rgba(7, 8, 11, 0.65);
 }
 .btn-on-sea:hover {
   color: #fff;
-  background: rgb(255 255 255 / 0.16);
+  border-color: #dc2626;
+  background: rgba(220, 38, 38, 0.2);
+}
+
+/* row & detail aperture icons (replaces pixel boat canvas) */
+.boat-icon.agent-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  background: #0d1017;
+  border: 1px solid var(--line);
+  color: #71717a;
+}
+.boat-icon.agent-badge svg {
+  width: 22px;
+  height: 22px;
+}
+.boat-icon.agent-badge.is-working {
+  color: #10b981;
+  border-color: rgba(16, 185, 129, 0.4);
+}
+.boat-icon.agent-badge.is-working svg {
+  animation: a37-spin 6s linear infinite;
+}
+.boat-icon.agent-badge.is-waking,
+.boat-icon.agent-badge.is-creating {
+  color: #ef4444;
+  border-color: rgba(239, 68, 68, 0.45);
+}
+.boat-icon.agent-badge.is-waking svg,
+.boat-icon.agent-badge.is-creating svg {
+  animation: a37-pulse 0.9s ease-in-out infinite alternate;
+}
+.boat-icon.agent-badge.is-idle {
+  color: #e4e4e7;
+}
+.boat-icon.agent-badge.is-sleeping {
+  color: #f59e0b;
+}
+.boat-icon.agent-badge.is-error {
+  color: #ef4444;
+  border-color: #ef4444;
+}
+
+@keyframes a37-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes a37-pulse {
+  from {
+    opacity: 0.45;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .boat-icon.agent-badge svg {
+    animation: none !important;
+  }
 }

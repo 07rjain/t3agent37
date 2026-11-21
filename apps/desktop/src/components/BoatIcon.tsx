@@ -1,25 +1,17 @@
-import { useRef } from "react";
 import type { MachineState } from "../types";
-import { useAnimation, useTheme } from "../pixel/clock";
-import { ICON_H, ICON_W, paintBoatIcon } from "../pixel/paint";
-import { Px } from "../pixel/px";
 
-/** A machine's boat on its own patch of water, for list rows. */
-export function BoatIcon({ state, seed }: { state: MachineState; seed: number }) {
-  const canvas = useRef<HTMLCanvasElement>(null);
-  const buffer = useRef<Px | null>(null);
-  const theme = useTheme();
-
-  useAnimation(
-    (t) => {
-      const ctx = canvas.current?.getContext("2d");
-      if (!ctx) return;
-      const px = (buffer.current ??= new Px(ICON_W, ICON_H));
-      paintBoatIcon(px, theme, state, seed, t);
-      px.blit(ctx);
-    },
-    [theme, state, seed],
+/** Agent37 monochrome/crimson tactical aperture emblem for machine list rows and details. */
+export function BoatIcon({ state }: { state: MachineState; seed?: number }) {
+  return (
+    <span className={`boat-icon agent-badge is-${state}`} aria-hidden>
+      <svg viewBox="0 0 28 28" fill="none" stroke="currentColor" strokeWidth="1.6">
+        <circle cx="14" cy="14" r="10.5" strokeDasharray={state === "asleep" || state === "missing" ? "3 2.5" : undefined} />
+        <line x1="14" y1="1.5" x2="14" y2="6" />
+        <line x1="14" y1="22" x2="14" y2="26.5" />
+        <line x1="1.5" y1="14" x2="6" y2="14" />
+        <line x1="22" y1="14" x2="26.5" y2="14" />
+        <circle cx="14" cy="14" r="3" fill="currentColor" stroke="none" />
+      </svg>
+    </span>
   );
-
-  return <canvas ref={canvas} width={ICON_W} height={ICON_H} className="boat-icon" aria-hidden />;
 }

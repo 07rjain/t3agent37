@@ -83,13 +83,17 @@ button.row-name {
 .glance-boat {
   display: grid;
   place-items: center;
-  width: 80px;
-  height: 70px;
+  width: 68px;
+  height: 68px;
   background: var(--panel);
 }
 .glance-boat .boat-icon {
-  width: 72px;
-  height: 63px;
+  width: 68px;
+  height: 68px;
+}
+.glance-boat .boat-icon svg {
+  width: 38px;
+  height: 38px;
 }
 .glance-text {
   display: flex;
