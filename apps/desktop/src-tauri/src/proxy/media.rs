@@ -73,7 +73,7 @@ fn authorized_target(m: &MachineRuntime, parts: &Parts) -> Option<String> {
     let query = parts.uri.query().unwrap_or_default();
     let ticketed = query_param(query, "wsTicket").is_some_and(|t| m.auth.check_ticket(&t, TicketUse::Media));
     (ticketed || client_authorized(m, &parts.headers))
-        .then(|| format!("{}?{}", parts.uri.path(), query_without(query, &["wsTicket"])))
+        .then(|| format!("{}?{}", parts.uri.path(), query_without(query, &["wsTicket", "dpop"])))
 }
 
 /// Passes frames both ways until either side ends, close code and reason included: T3 Code

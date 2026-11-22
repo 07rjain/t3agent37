@@ -178,13 +178,18 @@ async fn upstream_http(State(mock): State<Arc<Mock>>, req: Request) -> Response 
     edge(req.headers());
     assert_eq!(mock.control.lock().unwrap().status, "running");
     match req.uri().path() {
-        "/.well-known/t3/environment" => Json(json!({"environmentId": "fixture"})).into_response(),
+        "/.well-known/t3/environment" => Json(json!({
+            "environmentId": "fixture",
+            "capabilities": {"accessTokenRenewal": true}
+        }))
+        .into_response(),
         "/api/auth/session" => {
             bearer(req.headers(), UPSTREAM);
             Json(json!({"scopes": ["rpc"]})).into_response()
         }
         SHELL => {
             bearer(req.headers(), UPSTREAM);
+            assert!(req.headers().get("dpop").is_none(), "client DPoP header leaked upstream");
             mock.event("shell");
             Json(snapshot()).into_response()
         }
@@ -217,7 +222,11 @@ async fn upstream_ws(
             let answer = match req["tag"].as_str().unwrap() {
                 "subscribeServerConfig" => json!({
                     "_tag": "Chunk", "requestId": id,
-                    "values": [{"config": {"directEndpoints": ["https://private.invalid"], "fixture": true}}]
+                    "values": [{"config": {
+                        "directEndpoints": ["https://private.invalid"],
+                        "environment": {"capabilities": {"accessTokenRenewal": true}},
+                        "fixture": true
+                    }}]
                 }),
                 "orchestration.dispatchCommand" => {
                     mock.commands.lock().unwrap().push(req["payload"].clone());
@@ -507,7 +516,10 @@ async fn pairing_injects_edge_credentials_and_strips_direct_endpoints() {
     assert_eq!(
         reply(&mut ws, LIMIT).await,
         json!({
-            "_tag": "Chunk", "requestId": "config", "values": [{"config": {"fixture": true}}]
+            "_tag": "Chunk", "requestId": "config", "values": [{"config": {
+                "environment": {"capabilities": {"accessTokenRenewal": false}},
+                "fixture": true
+            }}]
         })
     );
     assert_eq!(f.mock.events(), ["running", "shell", "ws-upgrade"]);
@@ -708,6 +720,128 @@ async fn resize_failure_recovers_power_from_starting() {
     // Power must recover back to Running instead of staying stuck in Starting.
     assert_eq!(f.machine.power(), Power::Running);
     assert_eq!(f.machine.record().disk_gb, 12);
+}
+
+#[tokio::test]
+async fn descriptor_disables_access_token_renewal_and_supports_bearer_pairing() {
+    let f = Fixture::new("running").await;
+
+    // Fresh descriptor fetched while running must force accessTokenRenewal=false even when
+    // upstream advertises true.
+    let fresh_desc: Value = f
+        .http
+        .get(format!("{}/.well-known/t3/environment", f.base))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(fresh_desc["label"], json!("Fixture"));
+    assert_eq!(fresh_desc["capabilities"]["accessTokenRenewal"], json!(false));
+
+    // Pair with the full T3 Code Bearer token-exchange form (no DPoP).
+    let code = f.machine.auth.new_pairing_code();
+    let form = [
+        ("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange"),
+        ("subject_token", code.as_str()),
+        ("subject_token_type", "urn:t3:params:oauth:token-type:environment-bootstrap"),
+        ("requested_token_type", "urn:ietf:params:oauth:token-type:access_token"),
+        ("client_label", "T3 Code (Desktop)"),
+        ("client_device_type", "desktop"),
+        ("client_os", "linux"),
+    ];
+    let tok: Value = f
+        .http
+        .post(format!("{}/oauth/token", f.base))
+        .form(&form)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(tok["token_type"], json!("Bearer"));
+    let token = tok["access_token"].as_str().unwrap().to_owned();
+    // Bootstrap code is one-time use.
+    assert_eq!(
+        f.http
+            .post(format!("{}/oauth/token", f.base))
+            .form(&form)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    // Client DPoP proof header must never leak upstream on HTTP relay.
+    let shell: Value = f
+        .http
+        .get(format!("{}{SHELL}", f.base))
+        .bearer_auth(&token)
+        .header("dpop", "fake.dpop.proof")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(shell, snapshot());
+
+    // Bare /api/auth/websocket-ticket fallback must also issue a local RPC ticket usable on /ws.
+    let bare_ticket: Value = f
+        .http
+        .post(format!("{}/api/auth/websocket-ticket", f.base))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let ws_url = format!(
+        "{}/ws?wsTicket={}",
+        f.base.replacen("http:", "ws:", 1),
+        bare_ticket["ticket"].as_str().unwrap()
+    );
+    let (mut ws, _) = timeout(LIMIT, connect_async(ws_url)).await.unwrap().unwrap();
+    rpc(&mut ws, "cfg", "subscribeServerConfig", json!({})).await;
+    assert_eq!(
+        reply(&mut ws, LIMIT).await,
+        json!({
+            "_tag": "Chunk", "requestId": "cfg", "values": [{"config": {
+                "environment": {"capabilities": {"accessTokenRenewal": false}},
+                "fixture": true
+            }}]
+        })
+    );
+    let _ = ws.close(None).await;
+
+    // Cached descriptor served while sleeping must also advertise accessTokenRenewal=false.
+    timeout(LIMIT, f.machine.sleep_now()).await.unwrap().unwrap();
+    assert_eq!(f.machine.power(), Power::Stopped);
+    let cached_desc: Value = f
+        .http
+        .get(format!("{}/.well-known/t3/environment", f.base))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cached_desc["label"], json!("Fixture"));
+    assert_eq!(cached_desc["capabilities"]["accessTokenRenewal"], json!(false));
 }
 
 /// Live end-to-end test against real Agent37 using the locally saved API key

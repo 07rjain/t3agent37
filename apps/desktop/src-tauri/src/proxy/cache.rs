@@ -308,9 +308,18 @@ fn apply_provider_deltas(held: &Value, deltas: &Value) -> Vec<Value> {
 }
 
 /// T3 Code learns LAN and tailnet routes from `directEndpoints` and would bypass the proxy.
+/// It also switches direct pairing to DPoP when `accessTokenRenewal` is advertised, whereas the
+/// localhost proxy issues long-lived Bearer tokens so connections survive sleep without renewal.
 pub fn sanitize_server_config(config: &mut Value) {
     if let Some(config) = config.as_object_mut() {
         config.remove("directEndpoints");
+        if let Some(caps) = config
+            .get_mut("environment")
+            .and_then(|e| e.get_mut("capabilities"))
+            .and_then(Value::as_object_mut)
+        {
+            caps.insert("accessTokenRenewal".into(), Value::Bool(false));
+        }
     }
 }
 
@@ -469,5 +478,20 @@ mod tests {
         assert!(capture.shell(Some(6)).is_none());
         assert!(matches!(capture.shell(Some(4)), Some(Shell::Snapshot(_))));
         assert!(matches!(capture.shell(None), Some(Shell::Snapshot(_))));
+    }
+
+    #[test]
+    fn sanitize_server_config_strips_direct_endpoints_and_disables_access_token_renewal() {
+        let mut cfg = json!({
+            "directEndpoints": ["https://private.invalid"],
+            "environment": {
+                "environmentId": "env-1",
+                "capabilities": {"accessTokenRenewal": true, "other": true}
+            }
+        });
+        sanitize_server_config(&mut cfg);
+        assert!(cfg.get("directEndpoints").is_none());
+        assert_eq!(cfg["environment"]["capabilities"]["accessTokenRenewal"], json!(false));
+        assert_eq!(cfg["environment"]["capabilities"]["other"], json!(true));
     }
 }

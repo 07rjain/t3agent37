@@ -45,6 +45,7 @@ pub async fn serve(machine: Arc<MachineRuntime>) -> Result<()> {
         .route("/.well-known/t3/environment", get(descriptor))
         .route("/oauth/token", post(oauth_token))
         .route("/api/auth/session", get(auth_session))
+        .route("/api/auth/websocket-ticket", post(rpc_ticket))
         .route("/api/auth/websocket-ticket/{opens}", post(ticket))
         .route("/ws", get(ws))
         .route("/api/device-hub/{*path}", any(media::stream))
@@ -120,6 +121,11 @@ async fn descriptor(State(m): M) -> Response {
         Some(mut d) => {
             // The sidebar shows the machine's name, not the sandbox hostname.
             d["label"] = Value::String(m.record().name);
+            // The localhost proxy issues long-lived Bearer tokens so T3 Code stays connected
+            // across sleep without renewal; keep direct pairing on Bearer rather than DPoP.
+            if let Some(caps) = d.get_mut("capabilities").and_then(Value::as_object_mut) {
+                caps.insert("accessTokenRenewal".into(), Value::Bool(false));
+            }
             Json(d).into_response()
         }
         // Transient, so T3 Code keeps retrying instead of blocking the connection.
@@ -171,7 +177,17 @@ async fn auth_session(State(m): M, headers: HeaderMap) -> Response {
 /// The proxy's own tickets, for the RPC socket and for media streams alike: asking for one
 /// never reaches the machine.
 async fn ticket(State(m): M, Path(opens): Path<TicketUse>, headers: HeaderMap) -> Response {
-    if !client_authorized(&m, &headers) {
+    issue_ticket(&m, &headers, opens)
+}
+
+/// Bare fallback route T3 Code retries on 404: issues a local RPC ticket so it never reaches
+/// upstream (an upstream ticket cannot open the proxy's `/ws`).
+async fn rpc_ticket(State(m): M, headers: HeaderMap) -> Response {
+    issue_ticket(&m, &headers, TicketUse::Rpc)
+}
+
+fn issue_ticket(m: &MachineRuntime, headers: &HeaderMap, opens: TicketUse) -> Response {
+    if !client_authorized(m, headers) {
         return unauthorized();
     }
     let (ticket, ttl) = m.auth.issue_ticket(opens);
@@ -370,6 +386,7 @@ async fn relay(m: &MachineRuntime, parts: Parts, body: Body, route: Relay) -> Re
             // The credential is the route's, the edge key is injected below, and the body's
             // length is what is sent here.
             let replaced = k == header::AUTHORIZATION
+                || k.as_str().eq_ignore_ascii_case("dpop")
                 || k == header::CONTENT_LENGTH
                 || k.as_str().eq_ignore_ascii_case(crate::agent37::HEADER_API_KEY);
             if !replaced && !HOP_BY_HOP.contains(&k.as_str()) {
