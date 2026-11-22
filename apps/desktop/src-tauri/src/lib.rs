@@ -9,6 +9,7 @@ pub mod store;
 pub mod t3desktop;
 #[cfg(feature = "desktop")]
 mod tray;
+pub mod updater;
 pub mod webui;
 
 #[cfg(feature = "desktop")]

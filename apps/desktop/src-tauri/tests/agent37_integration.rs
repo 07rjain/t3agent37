@@ -378,6 +378,7 @@ impl Fixture {
             settings: RwLock::new(Settings::default()),
             events: mpsc::unbounded_channel().0,
             http: http.clone(),
+            sign_in_cancel: std::sync::Mutex::new(None),
         });
         let record: Machine = serde_json::from_value(json!({
             "id": "test-instance", "sandboxId": "test-instance", "name": "Fixture",
@@ -923,6 +924,7 @@ async fn live_agent37_roundtrip() {
             settings: RwLock::new(Settings::default()),
             events: mpsc::unbounded_channel().0,
             http: plain_http.clone(),
+            sign_in_cancel: std::sync::Mutex::new(None),
         });
         let machine = Arc::new(MachineRuntime::new(shared, record.clone(), dir.clone()));
         machine.refresh_power().await?;

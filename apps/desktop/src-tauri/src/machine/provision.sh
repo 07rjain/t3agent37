@@ -8,12 +8,17 @@ set -euo pipefail
 
 version="$1" sleep_after="$2" mint_upstream="$3" name="$4"
 secret="$T3BOAT_SECRET"
+step_file="${T3BOAT_STEP_FILE:-}"
 here="$(cd "$(dirname "$0")" && pwd)"
 t3="$HOME/.local/bin/t3"
 state_dir="$HOME/.t3agent37"
 mkdir -p "$state_dir" "$HOME/.local/bin" "$HOME/.t3/userdata"
 chmod 700 "$state_dir"
 export PATH="$HOME/.local/bin:$PATH"
+
+report_step() {
+  [ -n "$step_file" ] && printf '%s\n' "$1" >"$step_file" 2>/dev/null || true
+}
 
 find_supervisor_pid() {
   local pid_file="$state_dir/supervisor.pid"
@@ -82,7 +87,8 @@ ensure_supervisor() {
 export PATH="$HOME/.local/bin:$PATH"
 restart_t3=0
 if [ "$("$t3" --version 2>/dev/null || true)" != "t3 v$version" ]; then
-  if ! curl -fsSL https://t3.codes/install.sh | T3CODE_VERSION="$version" sh >"$state_dir/install.log" 2>&1; then
+  report_step "Installing T3 Code"
+  if ! curl -fsSL --connect-timeout 15 --max-time 60 https://t3.codes/install.sh | T3CODE_VERSION="$version" sh >"$state_dir/install.log" 2>&1; then
     echo "T3 install failed" >&2
     tail -n 40 "$state_dir/install.log" >&2 || true
     exit 1
@@ -97,6 +103,7 @@ missing_pkgs=()
 command -v claude >/dev/null 2>&1 || missing_pkgs+=(@anthropic-ai/claude-code)
 command -v codex >/dev/null 2>&1 || missing_pkgs+=(@openai/codex)
 if [ "${#missing_pkgs[@]}" -gt 0 ] && command -v npm >/dev/null 2>&1; then
+  report_step "Installing agent CLIs"
   if npm install -g --prefix "$HOME/.local" --no-audit --no-fund "${missing_pkgs[@]}" >"$state_dir/agents-install.log" 2>&1; then
     restart_t3=1
   else
@@ -163,17 +170,21 @@ if [ "$restart_supervisor" = 1 ] && [ -n "$sup_pid" ]; then
 fi
 
 # Ensure supervisor is running; only restart t3 when needed or not yet answering.
+report_step "Starting T3 server"
 if [ -z "$sup_pid" ]; then
   sup_pid="$(ensure_supervisor)"
-elif [ "$restart_t3" = 1 ] || ! curl -sf -o /dev/null http://127.0.0.1:3773/.well-known/t3/environment; then
+elif [ "$restart_t3" = 1 ] || ! curl -sf --connect-timeout 2 --max-time 3 -o /dev/null http://127.0.0.1:3773/.well-known/t3/environment; then
   old_t3_pid="$(read_pid "$state_dir/t3.pid")"
   kill -USR2 "$sup_pid"
   wait_pid_exit "$old_t3_pid"
 fi
 
+# Always pass --connect-timeout/--max-time: t3 serve binds :3773 briefly before attaching its HTTP
+# handler, and an unbounded curl hitting that window will hang indefinitely waiting for bytes.
 ready=0
-for _ in $(seq 1 120); do
-  if curl -sf -o /dev/null http://127.0.0.1:3773/.well-known/t3/environment; then
+deadline=$((SECONDS + 60))
+while [ "$SECONDS" -lt "$deadline" ]; do
+  if curl -sf --connect-timeout 2 --max-time 3 -o /dev/null http://127.0.0.1:3773/.well-known/t3/environment; then
     ready=1
     break
   fi
@@ -186,6 +197,7 @@ if [ "$ready" != 1 ]; then
 fi
 
 # Watchdog: its own read-only T3 token, kept across upgrades.
+report_step "Starting watchdog"
 config="$state_dir/config.json"
 watchdog_token="$(node -e 'try{process.stdout.write(require(process.argv[1]).t3Token||"")}catch{}' "$config")"
 if [ -z "$watchdog_token" ]; then
@@ -208,8 +220,9 @@ sup_pid="$(ensure_supervisor)"
 kill -USR1 "$sup_pid"
 
 wd_ready=0
-for _ in $(seq 1 120); do
-  if printf 'header = "Authorization: Bearer %s"\n' "$secret" | curl -sf -o /dev/null -K - http://127.0.0.1:3774/t3boat-status; then
+deadline=$((SECONDS + 60))
+while [ "$SECONDS" -lt "$deadline" ]; do
+  if printf 'header = "Authorization: Bearer %s"\n' "$secret" | curl -sf --connect-timeout 2 --max-time 3 -o /dev/null -K - http://127.0.0.1:3774/t3boat-status; then
     wd_ready=1
     break
   fi
@@ -225,7 +238,7 @@ upstream_token=""
 if [ "$mint_upstream" = 1 ]; then
   upstream_token="$("$t3" auth session issue --token-only --ttl 3650d --label t3agent37)"
 fi
-environment_id="$(curl -sf http://127.0.0.1:3773/.well-known/t3/environment | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).environmentId))')"
+environment_id="$(curl -sf --connect-timeout 2 --max-time 10 http://127.0.0.1:3773/.well-known/t3/environment | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).environmentId))')"
 ENV_ID="$environment_id" TOK="$upstream_token" node -e '
   const o = { environmentId: process.env.ENV_ID };
   if (process.env.TOK) o.upstreamToken = process.env.TOK;

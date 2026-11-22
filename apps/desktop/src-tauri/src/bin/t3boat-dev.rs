@@ -67,6 +67,12 @@ async fn main() -> anyhow::Result<()> {
                     }
                     ui_events.set_sign_in_code(code);
                 }
+                Event::SignInUrl(url) => {
+                    if let Some(ref u) = url {
+                        println!("SIGN_IN_URL {u}");
+                    }
+                    ui_events.set_sign_in_url(url);
+                }
             }
         }
     });

@@ -1,10 +1,10 @@
 [package]
 name = "t3boat"
-version = "0.1.0"
+version = "0.2.0"
 description = "Auto-sleeping T3 Code remote machines on Agent37"
 license = "MIT"
 edition = "2024"
-default-run = "t3agent37-daemon"
+default-run = "t3boat"
 
 [lib]
 name = "t3boat_lib"

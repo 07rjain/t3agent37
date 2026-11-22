@@ -6,6 +6,7 @@ use crate::machine::provision::{SizeInfo, SIZES};
 use crate::machine::Event;
 use crate::mcp;
 use crate::store::Settings;
+use crate::updater::{self, InstallOutcome, UpdateInfo, UpdateStatus};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,6 +19,7 @@ use tauri_plugin_notification::NotificationExt;
 
 const PANEL: &str = "panel";
 const COSTS_EVERY: Duration = Duration::from_secs(180);
+const UPDATE_EVERY: Duration = Duration::from_secs(4 * 3600);
 const TRAY_ICON: &[u8] = if cfg!(target_os = "macos") {
     include_bytes!("../icons/tray@2x.png")
 } else {
@@ -30,8 +32,12 @@ struct Ui {
     setup: Mutex<SetupState>,
     account: Mutex<Option<Account>>,
     mcp: Mutex<McpStatus>,
+    update: Mutex<UpdateInfo>,
+    update_notified_version: Mutex<Option<String>>,
+    update_menu_item: Mutex<Option<MenuItem<tauri::Wry>>>,
     windowed: AtomicBool,
     init_lock: tokio::sync::Mutex<()>,
+    update_lock: tokio::sync::Mutex<()>,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -60,6 +66,7 @@ struct SetupState {
     setup: Setup,
     busy: bool,
     sign_in_code: Option<String>,
+    sign_in_url: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -75,12 +82,14 @@ struct UiState {
     setup: Setup,
     setup_busy: bool,
     sign_in_code: Option<String>,
+    sign_in_url: Option<String>,
     account: Option<Account>,
     machines: Vec<MachineView>,
     costs: Costs,
     settings: Settings,
     sizes: &'static [SizeInfo],
     mcp: McpStatus,
+    update: UpdateInfo,
 }
 
 impl Ui {
@@ -95,12 +104,14 @@ impl Ui {
             setup: setup.setup,
             setup_busy: setup.busy,
             sign_in_code: setup.sign_in_code,
+            sign_in_url: setup.sign_in_url,
             account: self.account.lock().unwrap().clone(),
             machines: app.as_ref().map(|a| a.views()).unwrap_or_default(),
             costs: app.as_ref().map(|a| a.costs()).unwrap_or_default(),
             settings: app.as_ref().map(|a| a.settings()).unwrap_or_default(),
             sizes: SIZES,
             mcp: self.mcp.lock().unwrap().clone(),
+            update: self.update.lock().unwrap().clone(),
         }
     }
 }
@@ -112,6 +123,20 @@ fn emit_state(handle: &AppHandle) {
 }
 
 fn update_tray(handle: &AppHandle, state: &UiState) {
+    let menu_item = handle.state::<Ui>().update_menu_item.lock().unwrap().clone();
+    if let Some(item) = menu_item {
+        let label = match state.update.status {
+            UpdateStatus::Checking => "Checking for updates…".to_owned(),
+            UpdateStatus::Downloading => "Downloading update…".to_owned(),
+            UpdateStatus::Installing => "Installing update…".to_owned(),
+            _ if state.update.update_available => match state.update.latest_version.as_deref() {
+                Some(v) => format!("Update to v{v}"),
+                None => "Update t3agent37".to_owned(),
+            },
+            _ => format!("Check for updates (v{})…", state.update.current_version),
+        };
+        let _ = item.set_text(label);
+    }
     let Some(tray) = handle.tray_by_id("main") else { return };
     let working = state.machines.iter().filter(|m| m.state == MachineState::Working).count();
     let awake = state
@@ -119,11 +144,16 @@ fn update_tray(handle: &AppHandle, state: &UiState) {
         .iter()
         .filter(|m| matches!(m.state, MachineState::Idle | MachineState::Working | MachineState::Waking))
         .count();
-    let tip = match (working, awake) {
+    let mut tip = match (working, awake) {
         (0, 0) => "t3agent37 · all machines asleep".to_owned(),
         (0, n) => format!("t3agent37 · {n} awake"),
         (w, _) => format!("t3agent37 · {w} working"),
     };
+    if state.update.update_available {
+        if let Some(v) = state.update.latest_version.as_deref() {
+            tip.push_str(&format!(" · v{v} available"));
+        }
+    }
     let _ = tray.set_tooltip(Some(tip));
 }
 
@@ -190,6 +220,10 @@ async fn events(handle: AppHandle, app: Arc<App>, mut rx: tokio::sync::mpsc::Unb
                 handle.state::<Ui>().setup.lock().unwrap().sign_in_code = code;
                 emit_state(&handle);
             }
+            Event::SignInUrl(url) => {
+                handle.state::<Ui>().setup.lock().unwrap().sign_in_url = url;
+                emit_state(&handle);
+            }
         }
     }
 }
@@ -202,6 +236,154 @@ async fn background(handle: AppHandle, app: Arc<App>) {
         }
         emit_state(&handle);
         tokio::time::sleep(COSTS_EVERY).await;
+    }
+}
+
+async fn perform_update_check(handle: &AppHandle, interactive: bool) -> Result<UpdateInfo, String> {
+    let ui = handle.state::<Ui>();
+    let _guard = ui.update_lock.lock().await;
+    {
+        let mut u = ui.update.lock().unwrap();
+        u.status = UpdateStatus::Checking;
+        u.error = None;
+    }
+    emit_state(handle);
+    match updater::check_latest().await {
+        Ok(info) => {
+            let should_notify = info.update_available
+                && info.latest_version.as_ref().is_some_and(|v| {
+                    let mut last = ui.update_notified_version.lock().unwrap();
+                    if last.as_deref() == Some(v.as_str()) {
+                        false
+                    } else {
+                        *last = Some(v.clone());
+                        true
+                    }
+                });
+            *ui.update.lock().unwrap() = info.clone();
+            emit_state(handle);
+            if should_notify {
+                if let Some(v) = info.latest_version.as_deref() {
+                    notify(
+                        handle,
+                        &format!("t3agent37 v{v} available"),
+                        "Open the menubar app and click Update to install the latest release.",
+                    );
+                }
+            }
+            Ok(info)
+        }
+        Err(e) => {
+            let msg = format!("{e:#}");
+            tracing::warn!("update check failed: {msg}");
+            if interactive {
+                let mut u = ui.update.lock().unwrap();
+                u.status = UpdateStatus::Error;
+                u.error = Some(msg.clone());
+                drop(u);
+                emit_state(handle);
+            } else {
+                let mut u = ui.update.lock().unwrap();
+                if u.status == UpdateStatus::Checking {
+                    u.status = UpdateStatus::Idle;
+                }
+                drop(u);
+                emit_state(handle);
+            }
+            Err(msg)
+        }
+    }
+}
+
+async fn perform_install_update(handle: &AppHandle) -> Res {
+    let ui = handle.state::<Ui>();
+    let _guard = ui.update_lock.lock().await;
+    let mut info = ui.update.lock().unwrap().clone();
+    if !info.update_available || info.asset_url.is_none() {
+        {
+            let mut u = ui.update.lock().unwrap();
+            u.status = UpdateStatus::Checking;
+            u.error = None;
+        }
+        emit_state(handle);
+        match updater::check_latest().await {
+            Ok(fresh) => {
+                *ui.update.lock().unwrap() = fresh.clone();
+                emit_state(handle);
+                info = fresh;
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                let mut u = ui.update.lock().unwrap();
+                u.status = UpdateStatus::Error;
+                u.error = Some(msg.clone());
+                drop(u);
+                emit_state(handle);
+                return Err(msg);
+            }
+        }
+    }
+    if !info.update_available {
+        return Ok(());
+    }
+    let stage_handle = handle.clone();
+    let res = updater::download_and_install(&info, move |stage| {
+        {
+            let ui = stage_handle.state::<Ui>();
+            let mut u = ui.update.lock().unwrap();
+            u.status = stage;
+            u.error = None;
+        }
+        emit_state(&stage_handle);
+    })
+    .await;
+
+    match res {
+        Ok(InstallOutcome::RestartRequired) => {
+            handle.exit(0);
+            Ok(())
+        }
+        Ok(InstallOutcome::OpenedExternal(dest)) => {
+            {
+                let mut u = ui.update.lock().unwrap();
+                u.status = UpdateStatus::UpToDate;
+                u.update_available = false;
+            }
+            emit_state(handle);
+            notify(
+                handle,
+                "t3agent37 updated",
+                &format!("Installed the new version to {} and launched it.", dest.display()),
+            );
+            Ok(())
+        }
+        Ok(InstallOutcome::OpenedReleasePage(_)) => {
+            {
+                let mut u = ui.update.lock().unwrap();
+                u.status = UpdateStatus::Available;
+            }
+            emit_state(handle);
+            Ok(())
+        }
+        Err(e) => {
+            let msg = format!("{e:#}");
+            tracing::error!("installing update failed: {msg}");
+            {
+                let mut u = ui.update.lock().unwrap();
+                u.status = UpdateStatus::Error;
+                u.error = Some(msg.clone());
+            }
+            emit_state(handle);
+            Err(msg)
+        }
+    }
+}
+
+async fn background_updates(handle: AppHandle) {
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    loop {
+        let _ = perform_update_check(&handle, false).await;
+        tokio::time::sleep(UPDATE_EVERY).await;
     }
 }
 
@@ -524,6 +706,28 @@ async fn add_mcp(handle: AppHandle, client: mcp::Client) -> Res {
 }
 
 #[tauri::command]
+async fn check_for_updates(handle: AppHandle) -> Res<UpdateInfo> {
+    perform_update_check(&handle, true).await
+}
+
+#[tauri::command]
+async fn install_update(handle: AppHandle) -> Res {
+    perform_install_update(&handle).await
+}
+
+#[tauri::command]
+fn open_release_notes(ui: State<'_, Ui>) -> Res {
+    let url = ui
+        .update
+        .lock()
+        .unwrap()
+        .release_url
+        .clone()
+        .unwrap_or_else(updater::releases_page_url);
+    app::open_url(&url).map_err(err)
+}
+
+#[tauri::command]
 fn quit_app(handle: AppHandle) {
     handle.exit(0);
 }
@@ -558,6 +762,9 @@ pub fn run() {
             update_settings,
             setup_action,
             add_mcp,
+            check_for_updates,
+            install_update,
+            open_release_notes,
             quit_app
         ])
         .setup(|app| {
@@ -565,8 +772,16 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let open = MenuItem::with_id(app, "open", "Open t3agent37", true, None::<&str>)?;
+            let update_item = MenuItem::with_id(
+                app,
+                "update",
+                format!("Check for updates (v{})…", updater::CURRENT_VERSION),
+                true,
+                None::<&str>,
+            )?;
             let quit = MenuItem::with_id(app, "quit", "Quit t3agent37", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &quit])?;
+            *app.state::<Ui>().update_menu_item.lock().unwrap() = Some(update_item.clone());
+            let menu = Menu::with_items(app, &[&open, &update_item, &quit])?;
             TrayIconBuilder::with_id("main")
                 .icon(tauri::image::Image::from_bytes(TRAY_ICON)?)
                 .icon_as_template(true)
@@ -575,6 +790,38 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "open" => toggle_panel(app, None),
+                    "update" => {
+                        let handle = app.clone();
+                        let already_available = handle.state::<Ui>().update.lock().unwrap().update_available;
+                        open_panel(&handle, None);
+                        tauri::async_runtime::spawn(async move {
+                            if already_available {
+                                if let Err(e) = perform_install_update(&handle).await {
+                                    notify(&handle, "Update failed", &e);
+                                }
+                            } else {
+                                match perform_update_check(&handle, true).await {
+                                    Ok(info) if info.update_available => {
+                                        if let Some(v) = info.latest_version.as_deref() {
+                                            notify(
+                                                &handle,
+                                                &format!("t3agent37 v{v} available"),
+                                                "Click Update in the menubar panel to install.",
+                                            );
+                                        }
+                                    }
+                                    Ok(info) => {
+                                        notify(
+                                            &handle,
+                                            "t3agent37 is up to date",
+                                            &format!("You are running v{}.", info.current_version),
+                                        );
+                                    }
+                                    Err(e) => notify(&handle, "Update check failed", &e),
+                                }
+                            }
+                        });
+                    }
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -610,6 +857,7 @@ pub fn run() {
             #[cfg(target_os = "linux")]
             follow_tray_host(app.handle());
             tauri::async_runtime::spawn(init(app.handle().clone()));
+            tauri::async_runtime::spawn(background_updates(app.handle().clone()));
             Ok(())
         })
         .build(tauri::generate_context!())

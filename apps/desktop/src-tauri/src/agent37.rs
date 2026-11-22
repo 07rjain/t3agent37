@@ -1,18 +1,22 @@
-//! Agent37 REST API client, pricing model, API key storage, and SSH port forwarding.
+//! Agent37 REST API client, pricing model, API key storage, and HTTPS OAuth port forwarding.
 //!
 //! Uses pure HTTPS/JSON (`reqwest` with rustls) so no external CLI is required for lifecycle,
-//! exec, or billing operations. The workspace `sk_live_...` key lives only on the local host
-//! (never inside sandboxes) and is injected on upstream requests via `X-Agent37-Key`.
+//! exec, billing, or OAuth callback forwarding. The workspace `sk_live_...` key lives only on
+//! the local host (never inside sandboxes) and is injected on upstream requests via `X-Agent37-Key`.
 
-use crate::process::command;
 use crate::store;
 use anyhow::{anyhow, bail, Context, Result};
+use axum::body::Body as AxumBody;
+use axum::extract::Request as AxumRequest;
+use axum::response::{IntoResponse, Response as AxumResponse};
+use rand::RngCore;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
 use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_API_BASE: &str = "https://api.agent37.com";
@@ -561,7 +565,7 @@ impl Agent37 {
                 return Ok(());
             }
             let text = res.text().await.unwrap_or_default();
-            if status == StatusCode::CONFLICT && is_try_again(&text) && started.elapsed() < CHECKPOINT_RETRY_WINDOW {
+            if should_retry_try_again(status, &text) && started.elapsed() < CHECKPOINT_RETRY_WINDOW {
                 tokio::time::sleep(delay).await;
                 delay = (delay * 2).min(Duration::from_secs(5));
                 continue;
@@ -571,7 +575,8 @@ impl Agent37 {
     }
 
     /// Runs a shell command inside the instance via `https://sandbox.agent37.app/v1/instances/{id}/exec`
-    /// with `X-Agent37-Key`, retrying `409 try_again` while a checkpoint is finishing.
+    /// with `X-Agent37-Key`, retrying transient `409`/`503 try_again` responses while a checkpoint
+    /// or host routing transition is finishing.
     pub async fn exec(
         &self,
         id: &str,
@@ -598,8 +603,8 @@ impl Agent37 {
                 .with_context(|| format!("exec on Agent37 instance {id}"))?;
             let status = res.status();
             let text = res.text().await.unwrap_or_default();
-            if status == StatusCode::CONFLICT && is_try_again(&text) && started.elapsed() < CHECKPOINT_RETRY_WINDOW {
-                tracing::debug!("Agent37 exec on {id} returned 409 try_again; retrying in {delay:?}");
+            if should_retry_try_again(status, &text) && started.elapsed() < CHECKPOINT_RETRY_WINDOW {
+                tracing::debug!("Agent37 exec on {id} returned {status} try_again; retrying in {delay:?}");
                 tokio::time::sleep(delay).await;
                 delay = (delay * 2).min(Duration::from_secs(5));
                 continue;
@@ -642,42 +647,79 @@ impl Agent37 {
         Ok(())
     }
 
-    /// Forwards `port` on this computer to `127.0.0.1:<port>` inside the Agent37 instance using
-    /// Agent37's authenticated WebSocket SSH tunnel (`agent37 ssh <id> -- -N -L ...`).
-    pub async fn forward(&self, id: &str, port: u16) -> Result<tokio::process::Child> {
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
-            bail!("port {port} is in use on this computer; finish or close the other sign-in first");
+    /// Forwards HTTP OAuth callbacks on `127.0.0.1:<port>` (and `[::1]:<port>` when available)
+    /// to `127.0.0.1:<port>` inside the Agent37 instance over Agent37's authenticated HTTPS
+    /// preview proxy — no external `agent37` CLI or SSH setup required.
+    pub async fn forward(&self, id: &str, port: u16) -> Result<PortForward> {
+        let v4 = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .map_err(|_| anyhow!("port {port} is in use on this computer; finish or close the other sign-in first"))?;
+        // Best-effort IPv6 loopback so `http://localhost:<port>` works even when resolved to `::1`.
+        let v6 = tokio::net::TcpListener::bind(("::1", port)).await.ok();
+
+        let mut secret_bytes = [0u8; 24];
+        rand::rngs::OsRng.fill_bytes(&mut secret_bytes);
+        let relay_secret: String = secret_bytes.iter().map(|b| format!("{b:02x}")).collect();
+
+        use base64::Engine;
+        let script_b64 = base64::engine::general_purpose::STANDARD.encode(OAUTH_RELAY_JS.as_bytes());
+        let start_cmd = format!(
+            "set -e; umask 077; d=$(mktemp -d); \
+             printf '%s' '{script_b64}' | base64 -d > \"$d/relay.js\"; \
+             printf '%s' '{relay_secret}' > \"$d/secret\"; \
+             PATH=\"$HOME/.local/bin:/usr/local/bin:$PATH\" nohup node \"$d/relay.js\" {port} \"$d/secret\" \"$d/port\" </dev/null >\"$d/log\" 2>&1 & \
+             pid=$!; \
+             for i in $(seq 1 40); do \
+               [ -s \"$d/port\" ] && break; \
+               kill -0 \"$pid\" 2>/dev/null || break; \
+               sleep 0.1; \
+             done; \
+             if [ ! -s \"$d/port\" ]; then \
+               cat \"$d/log\" >&2; rm -rf \"$d\"; exit 1; \
+             fi; \
+             printf 'RELAY %s %s %s\\n' \"$(cat \"$d/port\")\" \"$pid\" \"$d\""
+        );
+        let out = self
+            .exec_ok(id, &start_cmd, 30)
+            .await
+            .context("starting OAuth loopback relay inside the machine")?;
+        let (bridge_port, remote_pid, remote_dir) = parse_relay_start(&out)?;
+
+        let upstream_base = self.preview_url(id, bridge_port);
+        let proxy_http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(30))
+            .build()
+            .context("building OAuth forward HTTP client")?;
+        let state = Arc::new(OAuthForwardState {
+            http: proxy_http,
+            upstream_base,
+            api_key: self.api_key.clone(),
+            relay_secret,
+            default_host: format!("127.0.0.1:{port}"),
+        });
+
+        let mut tasks = Vec::with_capacity(2);
+        let router = axum::Router::new().fallback(proxy_oauth_request).with_state(state.clone());
+        tasks.push(tokio::spawn(async move {
+            let _ = axum::serve(v4, router).await;
+        }));
+        if let Some(v6_listener) = v6 {
+            let router6 = axum::Router::new().fallback(proxy_oauth_request).with_state(state);
+            tasks.push(tokio::spawn(async move {
+                let _ = axum::serve(v6_listener, router6).await;
+            }));
         }
-        let forward_spec = format!("{port}:127.0.0.1:{port}");
-        let cli_bin = std::env::var_os("AGENT37_CLI")
-            .map(PathBuf::from)
-            .filter(|p| p.is_file())
-            .or_else(|| which::which("agent37").ok())
-            .ok_or_else(|| {
-                anyhow!(
-                    "the `agent37` CLI is required to forward localhost OAuth ports \
-                     (install with `npm install -g agent37` and run `agent37 ssh setup`)"
-                )
-            })?;
-        let mut cmd = command(cli_bin);
-        cmd.args(["ssh", id, "--", "-N", "-L", &forward_spec]);
-        let mut child = cmd
-            .env("AGENT37_API_KEY", &self.api_key)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .context("starting Agent37 SSH port forward")?;
-        for _ in 0..100 {
-            if let Some(status) = child.try_wait()? {
-                bail!("agent37 ssh forward exited ({status}); check your SSH key setup (`agent37 ssh setup`)");
-            }
-            if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
-                return Ok(child);
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-        bail!("agent37 ssh forward did not open local port {port}")
+
+        Ok(PortForward {
+            tasks,
+            cleanup: Some(RelayCleanup {
+                agent37: self.clone(),
+                instance_id: id.to_owned(),
+                pid: remote_pid,
+                dir: remote_dir,
+            }),
+        })
     }
 
     async fn wait_for_running(&self, id: &str, timeout: Duration) -> Result<Instance> {
@@ -723,8 +765,8 @@ impl Agent37 {
             let res = req.send().await?;
             let status = res.status();
             let text = res.text().await.unwrap_or_default();
-            if status == StatusCode::CONFLICT && is_try_again(&text) && started.elapsed() < CHECKPOINT_RETRY_WINDOW {
-                tracing::debug!("Agent37 {method} {path} returned 409 try_again; retrying in {delay:?}");
+            if should_retry_try_again(status, &text) && started.elapsed() < CHECKPOINT_RETRY_WINDOW {
+                tracing::debug!("Agent37 {method} {path} returned {status} try_again; retrying in {delay:?}");
                 tokio::time::sleep(delay).await;
                 delay = (delay * 2).min(Duration::from_secs(5));
                 continue;
@@ -842,6 +884,11 @@ fn parse_billing(v: &Value) -> BillingInfo {
     BillingInfo { balance_dollars, memory_limit_gb, tier, auto_top_up }
 }
 
+fn should_retry_try_again(status: StatusCode, body: &str) -> bool {
+    matches!(status, StatusCode::CONFLICT | StatusCode::SERVICE_UNAVAILABLE | StatusCode::BAD_GATEWAY)
+        && is_try_again(body)
+}
+
 fn is_try_again(body: &str) -> bool {
     serde_json::from_str::<Value>(body).ok().is_some_and(|v| {
         v["error"].as_str() == Some("try_again") || v["error"]["code"].as_str() == Some("try_again")
@@ -892,6 +939,244 @@ where
         return Ok(chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&chrono::Utc)));
     }
     Ok(None)
+}
+
+const HEADER_RELAY_SECRET: &str = "x-t3agent37-relay";
+const HEADER_ORIG_HOST: &str = "x-t3agent37-host";
+
+/// Minimal in-sandbox HTTP loopback relay so Agent37's authenticated preview edge
+/// (`https://{id}-{bridge_port}.agent37.app`, which connects over the container's non-loopback
+/// interface) can reach OAuth servers bound to `127.0.0.1:<port>` or `[::1]:<port>`.
+const OAUTH_RELAY_JS: &str = r#"const fs = require("fs");
+const http = require("http");
+const targetPort = Number(process.argv[2]);
+const secretPath = process.argv[3];
+const portPath = process.argv[4];
+const secret = fs.readFileSync(secretPath, "utf8").trim();
+try { fs.unlinkSync(secretPath); } catch {}
+const HOP = new Set([
+  "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+  "te", "trailer", "transfer-encoding", "upgrade",
+  "x-agent37-key", "x-t3agent37-relay", "x-t3agent37-host",
+  "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto",
+]);
+function forward(req, res, body, hosts, idx) {
+  const headers = {};
+  for (const [k, v] of Object.entries(req.headers)) {
+    const lk = k.toLowerCase();
+    if (!HOP.has(lk) && lk !== "content-length") headers[k] = v;
+  }
+  headers["host"] = req.headers["x-t3agent37-host"] || ("127.0.0.1:" + targetPort);
+  headers["connection"] = "close";
+  if (body.length > 0) headers["content-length"] = String(body.length);
+  const up = http.request(
+    { host: hosts[idx], port: targetPort, method: req.method, path: req.url, headers },
+    (upRes) => {
+      const out = {};
+      for (const [k, v] of Object.entries(upRes.headers)) {
+        if (!HOP.has(k.toLowerCase())) out[k] = v;
+      }
+      res.writeHead(upRes.statusCode || 502, out);
+      upRes.pipe(res);
+    }
+  );
+  up.on("error", (err) => {
+    if (idx + 1 < hosts.length && (err.code === "ECONNREFUSED" || err.code === "EADDRNOTAVAIL")) {
+      forward(req, res, body, hosts, idx + 1);
+      return;
+    }
+    if (!res.headersSent) {
+      res.writeHead(502, { "content-type": "text/plain" });
+      res.end("OAuth loopback target unreachable: " + err.message);
+    }
+  });
+  up.end(body);
+}
+const srv = http.createServer((req, res) => {
+  if (req.headers["x-t3agent37-relay"] !== secret) {
+    res.writeHead(403, { "content-type": "text/plain" });
+    res.end("forbidden");
+    return;
+  }
+  const chunks = [];
+  req.on("data", (c) => chunks.push(c));
+  req.on("end", () => forward(req, res, Buffer.concat(chunks), ["127.0.0.1", "::1"], 0));
+});
+srv.listen(0, "0.0.0.0", () => {
+  fs.writeFileSync(portPath, String(srv.address().port) + "\n");
+});
+setTimeout(() => process.exit(0), 660000).unref();
+"#;
+
+struct RelayCleanup {
+    agent37: Agent37,
+    instance_id: String,
+    pid: u32,
+    dir: String,
+}
+
+impl RelayCleanup {
+    async fn run(self) {
+        let cmd = format!("kill {} 2>/dev/null || true; rm -rf '{}'", self.pid, self.dir);
+        let _ = self.agent37.exec(&self.instance_id, &cmd, None, 15).await;
+    }
+}
+
+/// Active local-to-sandbox HTTP OAuth port forward. Aborts local listeners and removes the
+/// sandbox loopback relay when stopped or dropped.
+pub struct PortForward {
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+    cleanup: Option<RelayCleanup>,
+}
+
+impl PortForward {
+    pub async fn stop(mut self) {
+        for task in self.tasks.drain(..) {
+            task.abort();
+        }
+        if let Some(cleanup) = self.cleanup.take() {
+            cleanup.run().await;
+        }
+    }
+}
+
+impl Drop for PortForward {
+    fn drop(&mut self) {
+        for task in self.tasks.drain(..) {
+            task.abort();
+        }
+        if let Some(cleanup) = self.cleanup.take() {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(cleanup.run());
+            }
+        }
+    }
+}
+
+struct OAuthForwardState {
+    http: reqwest::Client,
+    upstream_base: String,
+    api_key: String,
+    relay_secret: String,
+    default_host: String,
+}
+
+fn parse_relay_start(stdout: &str) -> Result<(u16, u32, String)> {
+    let line = stdout
+        .lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with("RELAY "))
+        .ok_or_else(|| anyhow!("unexpected OAuth relay output: {}", stdout.trim()))?;
+    let mut parts = line.split_whitespace();
+    let _tag = parts.next();
+    let port: u16 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .filter(|&p| p > 0)
+        .ok_or_else(|| anyhow!("invalid OAuth relay port in output: {line}"))?;
+    let pid: u32 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .filter(|&p| p > 0)
+        .ok_or_else(|| anyhow!("invalid OAuth relay pid in output: {line}"))?;
+    let dir = parts.next().unwrap_or_default();
+    let Some(name) = dir.strip_prefix("/tmp/") else {
+        bail!("unexpected OAuth relay directory: {dir}");
+    };
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains("..")
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        bail!("unexpected OAuth relay directory: {dir}");
+    }
+    Ok((port, pid, dir.to_owned()))
+}
+
+fn is_hop_by_hop(name: &str) -> bool {
+    matches!(
+        name,
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
+}
+
+async fn proxy_oauth_request(
+    axum::extract::State(state): axum::extract::State<Arc<OAuthForwardState>>,
+    req: AxumRequest,
+) -> AxumResponse {
+    let (parts, body) = req.into_parts();
+    let path_and_query = parts
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
+    let target_url = format!("{}{path_and_query}", state.upstream_base);
+    let orig_host = parts
+        .headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or(&state.default_host)
+        .to_owned();
+
+    let body_bytes = match axum::body::to_bytes(body, 2 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("reading callback request: {e}")).into_response(),
+    };
+
+    let Ok(method) = Method::from_bytes(parts.method.as_str().as_bytes()) else {
+        return (StatusCode::METHOD_NOT_ALLOWED, "unsupported method").into_response();
+    };
+    let mut up = state.http.request(method, &target_url);
+    for (name, value) in &parts.headers {
+        let lower = name.as_str().to_ascii_lowercase();
+        if is_hop_by_hop(&lower)
+            || matches!(
+                lower.as_str(),
+                "host" | "content-length" | "x-agent37-key" | "x-t3agent37-relay" | "x-t3agent37-host"
+            )
+        {
+            continue;
+        }
+        if let (Ok(k), Ok(v)) = (HeaderName::from_bytes(name.as_str().as_bytes()), HeaderValue::from_bytes(value.as_bytes())) {
+            up = up.header(k, v);
+        }
+    }
+    up = up
+        .header(HEADER_API_KEY, &state.api_key)
+        .header(HEADER_RELAY_SECRET, &state.relay_secret)
+        .header(HEADER_ORIG_HOST, &orig_host);
+    if !body_bytes.is_empty() {
+        up = up.body(body_bytes);
+    }
+
+    let resp = match up.send().await {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("OAuth callback relay failed: {e}")).into_response(),
+    };
+
+    let status = axum::http::StatusCode::from_u16(resp.status().as_u16())
+        .unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
+    let mut builder = axum::http::Response::builder().status(status);
+    for (name, value) in resp.headers() {
+        let lower = name.as_str().to_ascii_lowercase();
+        if is_hop_by_hop(&lower) || lower == "content-length" {
+            continue;
+        }
+        builder = builder.header(name.as_str(), value.as_bytes());
+    }
+    let resp_bytes = resp.bytes().await.unwrap_or_default();
+    builder
+        .body(AxumBody::from(resp_bytes))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 #[cfg(test)]
@@ -1008,6 +1293,11 @@ mod tests {
                     let n = s.exec_calls.fetch_add(1, Ordering::SeqCst);
                     if n == 0 {
                         (StatusCode::CONFLICT, Json(json!({ "error": "try_again" })))
+                    } else if n == 1 {
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({ "error": { "code": "try_again", "message": "not on this host" } })),
+                        )
                     } else {
                         (StatusCode::OK, Json(json!({ "exit_code": 0, "stdout": "ok\n", "stderr": "" })))
                     }
@@ -1042,10 +1332,117 @@ mod tests {
 
         let out = client.exec_ok("inst_1", "echo ok", 10).await.unwrap();
         assert_eq!(out, "ok\n");
-        assert_eq!(state.exec_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(state.exec_calls.load(Ordering::SeqCst), 3);
 
         client.sleep("inst_1").await.unwrap();
         client.patch_auto_sleep("inst_1", true, Some(3600)).await.unwrap();
         client.delete("inst_1").await.unwrap();
+    }
+
+    #[test]
+    fn parse_relay_start_validates_fields() {
+        assert_eq!(
+            parse_relay_start("noise\nRELAY 49152 1234 /tmp/tmp.abc123\n").unwrap(),
+            (49152, 1234, "/tmp/tmp.abc123".to_owned())
+        );
+        assert!(parse_relay_start("RELAY 0 1234 /tmp/ok").is_err());
+        assert!(parse_relay_start("RELAY 49152 1234 /etc/passwd").is_err());
+        assert!(parse_relay_start("RELAY 49152 1234 /tmp/a/../b").is_err());
+    }
+
+    #[tokio::test]
+    async fn forward_proxies_oauth_callback_without_cli_and_preserves_redirects() {
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct MockState {
+            relay_secret: Mutex<Option<String>>,
+            cleanup_cmds: Mutex<Vec<String>>,
+            seen_query: Mutex<Option<String>>,
+            seen_host: Mutex<Option<String>>,
+        }
+        let state = Arc::new(MockState::default());
+
+        let app = Router::new()
+            .route(
+                "/v1/instances/{id}/exec",
+                post(|State(s): State<Arc<MockState>>, Json(body): Json<Value>| async move {
+                    let cmd = body["command"].as_str().unwrap_or_default().to_owned();
+                    if cmd.contains("relay.js") {
+                        // Extract the hex relay secret written to "$d/secret"
+                        if let Some((_, rest)) = cmd.split_once("> \"$d/relay.js\"; printf '%s' '") {
+                            if let Some((sec, _)) = rest.split_once('\'') {
+                                *s.relay_secret.lock().unwrap() = Some(sec.to_owned());
+                            }
+                        }
+                        Json(json!({ "exit_code": 0, "stdout": "RELAY 54321 777 /tmp/tmp.relay1\n", "stderr": "" }))
+                    } else {
+                        s.cleanup_cmds.lock().unwrap().push(cmd);
+                        Json(json!({ "exit_code": 0, "stdout": "", "stderr": "" }))
+                    }
+                }),
+            )
+            .route(
+                "/preview/{id}/{port}/auth/callback",
+                get(|State(s): State<Arc<MockState>>, AxumPath((id, port)): AxumPath<(String, u16)>, headers: AxumHeaders, req: AxumRequest| async move {
+                    assert_eq!(id, "inst_oauth");
+                    assert_eq!(port, 54321);
+                    assert_eq!(headers.get(HEADER_API_KEY).unwrap(), "sk_live_test");
+                    let expected_secret = s.relay_secret.lock().unwrap().clone().unwrap();
+                    assert_eq!(headers.get(HEADER_RELAY_SECRET).unwrap(), expected_secret.as_str());
+                    *s.seen_query.lock().unwrap() = req.uri().query().map(str::to_owned);
+                    *s.seen_host.lock().unwrap() = headers.get(HEADER_ORIG_HOST).and_then(|v| v.to_str().ok()).map(str::to_owned);
+                    (
+                        StatusCode::FOUND,
+                        [("location", "/success?done=1")],
+                        "redirecting",
+                    )
+                }),
+            )
+            .with_state(state.clone());
+
+        let mock_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mock_addr = mock_listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(mock_listener, app).await.unwrap() });
+        let base = format!("http://{mock_addr}");
+
+        let client = Agent37::with_endpoints(
+            "sk_live_test".into(),
+            base.clone(),
+            base.clone(),
+            format!("{base}/preview/{{id}}/{{port}}"),
+        )
+        .unwrap()
+        .with_fast_retries();
+
+        // Pick an available ephemeral port to simulate the OAuth callback port (e.g. 1455).
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let local_port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let forward = client.forward("inst_oauth", local_port).await.unwrap();
+
+        let no_redirect = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let resp = no_redirect
+            .get(format!("http://127.0.0.1:{local_port}/auth/callback?code=xyz&state=s1"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        assert_eq!(resp.headers().get("location").unwrap(), "/success?done=1");
+        assert_eq!(state.seen_query.lock().unwrap().as_deref(), Some("code=xyz&state=s1"));
+        assert_eq!(
+            state.seen_host.lock().unwrap().as_deref(),
+            Some(format!("127.0.0.1:{local_port}").as_str())
+        );
+
+        forward.stop().await;
+
+        let cleanups = state.cleanup_cmds.lock().unwrap();
+        assert_eq!(cleanups.len(), 1);
+        assert!(cleanups[0].contains("kill 777") && cleanups[0].contains("/tmp/tmp.relay1"));
     }
 }

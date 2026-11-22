@@ -1,0 +1,128 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      should_release: ${{ steps.meta.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Check version and existing release
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="$(node scripts/release-notes.mjs --verify)"
+          tag="v${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            ref_tag="${GITHUB_REF#refs/tags/}"
+            if [[ "${ref_tag}" != "${tag}" ]]; then
+              echo "Tag ${ref_tag} does not match manifest version ${tag}" >&2
+              exit 1
+            fi
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          else
+            if gh release view "${tag}" >/dev/null 2>&1; then
+              echo "Release ${tag} already exists; skipping automatic release on main push."
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "Release ${tag} does not exist yet; building and publishing."
+              echo "should_release=true" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+  build-macos:
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            target: x86_64-apple-darwin
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+      - name: Install JS dependencies
+        run: bun install --frozen-lockfile
+      - name: Build Tauri app (${{ matrix.arch }})
+        working-directory: apps/desktop
+        run: bun run tauri build --target ${{ matrix.target }} --bundles app,dmg
+      - name: Package release artifacts
+        run: |
+          mkdir -p release-artifacts
+          bundle_dir="apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle"
+          tar -czf "release-artifacts/t3agent37-macos-${{ matrix.arch }}.app.tar.gz" -C "${bundle_dir}/macos" "t3agent37.app"
+          dmg_file="$(find "${bundle_dir}/dmg" -maxdepth 1 -name '*.dmg' | head -n 1)"
+          if [[ -n "${dmg_file}" ]]; then
+            cp "${dmg_file}" "release-artifacts/t3agent37-macos-${{ matrix.arch }}.dmg"
+          fi
+          ls -lh release-artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: release-artifacts/*
+
+  publish:
+    needs: [prepare, build-macos]
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-artifacts
+          merge-multiple: true
+      - name: Generate SHA256SUMS.txt
+        working-directory: dist-artifacts
+        run: |
+          sha256sum t3agent37-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          node scripts/release-notes.mjs "${{ needs.prepare.outputs.version }}" > release-notes.md
+          cat release-notes.md
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release edit "${TAG}" --title "t3agent37 ${TAG}" --notes-file release-notes.md
+            gh release upload "${TAG}" dist-artifacts/* --clobber
+          else
+            gh release create "${TAG}" dist-artifacts/* \
+              --title "t3agent37 ${TAG}" \
+              --notes-file release-notes.md \
+              --target "${GITHUB_SHA}"
+          fi

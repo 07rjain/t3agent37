@@ -151,6 +151,8 @@ pub enum Event {
     Notify { title: String, body: String },
     /// One-time device sign-in code (e.g. GitHub `gh auth login --web`), shown inline in UI.
     SignInCode(Option<String>),
+    /// Active browser OAuth sign-in URL (e.g. Codex / Claude), shown inline in UI as a clickable fallback.
+    SignInUrl(Option<String>),
 }
 
 /// What every machine shares: the Agent37 API client, local T3 desktop CLI, settings, and events.
@@ -160,6 +162,8 @@ pub struct Shared {
     pub settings: RwLock<Settings>,
     pub events: mpsc::UnboundedSender<Event>,
     pub http: reqwest::Client,
+    /// Cancels a prior in-flight browser OAuth sign-in so a retry immediately frees the local port.
+    pub sign_in_cancel: Mutex<Option<(tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>)>>,
 }
 
 impl Shared {
@@ -175,6 +179,9 @@ impl Shared {
     }
     pub fn set_sign_in_code(&self, code: Option<String>) {
         let _ = self.events.send(Event::SignInCode(code));
+    }
+    pub fn set_sign_in_url(&self, url: Option<String>) {
+        let _ = self.events.send(Event::SignInUrl(url));
     }
 }
 

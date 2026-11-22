@@ -13,6 +13,7 @@ use crate::machine::provision::{SizeInfo, SIZES};
 use crate::machine::signin::Agent;
 use crate::mcp;
 use crate::store::Settings;
+use crate::updater::{self, UpdateInfo, UpdateStatus};
 use anyhow::Result;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, HOST, ORIGIN};
@@ -50,12 +51,14 @@ pub struct UiState {
     pub setup: Setup,
     pub setup_busy: bool,
     pub sign_in_code: Option<String>,
+    pub sign_in_url: Option<String>,
     pub account: Option<Account>,
     pub machines: Vec<MachineView>,
     pub costs: Costs,
     pub settings: Settings,
     pub sizes: &'static [SizeInfo],
     pub mcp: McpStatus,
+    pub update: UpdateInfo,
 }
 
 #[derive(Clone, Debug)]
@@ -68,7 +71,9 @@ pub struct WebUi {
     app: Arc<App>,
     web_dir: Option<PathBuf>,
     sign_in_code: Mutex<Option<String>>,
+    sign_in_url: Mutex<Option<String>>,
     mcp_status: Mutex<McpStatus>,
+    update: Mutex<UpdateInfo>,
     tx: broadcast::Sender<BroadcastEvent>,
 }
 
@@ -79,12 +84,15 @@ impl WebUi {
             app,
             web_dir,
             sign_in_code: Mutex::new(None),
+            sign_in_url: Mutex::new(None),
             mcp_status: Mutex::new(McpStatus::default()),
+            update: Mutex::new(UpdateInfo::default()),
             tx,
         });
         let bg = ui.clone();
         tokio::spawn(async move {
             bg.refresh_mcp().await;
+            let _ = bg.refresh_update().await;
         });
         ui
     }
@@ -98,17 +106,49 @@ impl WebUi {
             setup: Setup::Ready,
             setup_busy: false,
             sign_in_code: self.sign_in_code.lock().unwrap().clone(),
+            sign_in_url: self.sign_in_url.lock().unwrap().clone(),
             account,
             machines: self.app.views(),
             costs: self.app.costs(),
             settings: self.app.settings(),
             sizes: SIZES,
             mcp: self.mcp_status.lock().unwrap().clone(),
+            update: self.update.lock().unwrap().clone(),
+        }
+    }
+
+    pub async fn refresh_update(&self) -> Result<UpdateInfo> {
+        {
+            let mut u = self.update.lock().unwrap();
+            u.status = UpdateStatus::Checking;
+            u.error = None;
+        }
+        self.emit_state();
+        match updater::check_latest().await {
+            Ok(info) => {
+                *self.update.lock().unwrap() = info.clone();
+                self.emit_state();
+                Ok(info)
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                let mut u = self.update.lock().unwrap();
+                u.status = UpdateStatus::Error;
+                u.error = Some(msg.clone());
+                drop(u);
+                self.emit_state();
+                Err(e)
+            }
         }
     }
 
     pub fn set_sign_in_code(&self, code: Option<String>) {
         *self.sign_in_code.lock().unwrap() = code;
+        self.emit_state();
+    }
+
+    pub fn set_sign_in_url(&self, url: Option<String>) {
+        *self.sign_in_url.lock().unwrap() = url;
         self.emit_state();
     }
 
@@ -473,6 +513,19 @@ async fn dispatch(ui: &Arc<WebUi>, cmd: &str, args: Value) -> Result<Value> {
                 "recheck" => ui.emit_state(),
                 other => anyhow::bail!("unknown setup action {other}"),
             }
+            Ok(Value::Null)
+        }
+        "check_for_updates" => Ok(serde_json::to_value(ui.refresh_update().await?)?),
+        "install_update" => {
+            let info = ui.update.lock().unwrap().clone();
+            let url = info.release_url.unwrap_or_else(updater::releases_page_url);
+            crate::app::open_url(&url)?;
+            Ok(Value::Null)
+        }
+        "open_release_notes" => {
+            let info = ui.update.lock().unwrap().clone();
+            let url = info.release_url.unwrap_or_else(updater::releases_page_url);
+            crate::app::open_url(&url)?;
             Ok(Value::Null)
         }
         "quit_app" => {

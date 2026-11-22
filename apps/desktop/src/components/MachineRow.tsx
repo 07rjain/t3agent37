@@ -30,6 +30,8 @@ interface Props {
   onAction: (a: Action) => void;
   onDismissDeleteError: () => void;
   onHover: (key: string | null) => void;
+  /** currently selected in the desktop workbench */
+  selected?: boolean;
   /** open this machine's details (`pickProject`: with the project picker open); omitted while it can't have any */
   onOpen?: (pickProject?: boolean) => void;
 }
@@ -42,6 +44,7 @@ export function MachineRow({
   onAction,
   onDismissDeleteError,
   onHover,
+  selected,
   onOpen,
 }: Props) {
   const key = machineKey(m);
@@ -61,7 +64,8 @@ export function MachineRow({
 
   return (
     <li
-      className={`row state-${m.state}${onOpen ? " is-openable" : ""}`}
+      className={`row state-${m.state}${onOpen ? " is-openable" : ""}${selected ? " is-selected" : ""}`}
+      aria-current={selected ? "true" : undefined}
       onClick={(e) => {
         // anywhere on the row except its own controls (buttons, menu)
         if (onOpen && !(e.target as Element).closest("button:not(.row-name), [role=menu]")) onOpen();

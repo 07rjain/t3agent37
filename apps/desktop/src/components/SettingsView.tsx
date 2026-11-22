@@ -26,11 +26,24 @@ interface Props {
   onSave: (s: Settings) => void;
   /** never rejects; errors are shown by the caller */
   onAddMcp: (client: McpClient) => Promise<void>;
-  onQuit: () => void;
+  onCheckUpdates?: () => void;
+  onInstallUpdate?: () => void;
+  onOpenReleaseNotes?: () => void;
+  /** omitted in headless web daemon mode where the supervisor manages the process */
+  onQuit?: () => void;
   onBack: () => void;
 }
 
-export function SettingsView({ state, onSave, onAddMcp, onQuit, onBack }: Props) {
+export function SettingsView({
+  state,
+  onSave,
+  onAddMcp,
+  onCheckUpdates,
+  onInstallUpdate,
+  onOpenReleaseNotes,
+  onQuit,
+  onBack,
+}: Props) {
   // optimistic copy; the next "state" event is the source of truth
   const [s, setS] = useState(state.settings);
   useEffect(() => setS(state.settings), [state.settings]);
@@ -165,6 +178,80 @@ export function SettingsView({ state, onSave, onAddMcp, onQuit, onBack }: Props)
             )}
           </span>
         </div>
+        {state.update && (onCheckUpdates || onInstallUpdate) ? (
+          <div className="setting">
+            <span className="caption">updates</span>
+            <div className="update-row">
+              <div className="update-meta">
+                <span className="setting-name">t3agent37 v{state.update.currentVersion}</span>
+                <span className="hint">
+                  {state.update.status === "checking"
+                    ? "Checking GitHub Releases…"
+                    : state.update.status === "downloading"
+                      ? `Downloading v${state.update.latestVersion ?? "latest"}…`
+                      : state.update.status === "installing"
+                        ? "Installing update & restarting…"
+                        : state.update.updateAvailable && state.update.latestVersion
+                          ? `v${state.update.latestVersion} available on GitHub`
+                          : state.update.status === "error" && state.update.error
+                            ? state.update.error
+                            : state.update.status === "upToDate"
+                              ? "Up to date"
+                              : "Checks GitHub Releases automatically"}
+                </span>
+              </div>
+              <div className="update-actions">
+                {state.update.updateAvailable && onInstallUpdate ? (
+                  <button
+                    className="btn btn-sm btn-solid"
+                    disabled={
+                      state.update.status === "downloading" ||
+                      state.update.status === "installing" ||
+                      state.update.status === "checking"
+                    }
+                    aria-busy={state.update.status === "downloading" || state.update.status === "installing"}
+                    onClick={onInstallUpdate}
+                  >
+                    {state.update.status === "downloading" || state.update.status === "installing" ? (
+                      <>
+                        <Dots /> Updating…
+                      </>
+                    ) : state.update.canSelfUpdate ? (
+                      `Update to v${state.update.latestVersion}`
+                    ) : (
+                      `Get v${state.update.latestVersion}`
+                    )}
+                  </button>
+                ) : onCheckUpdates ? (
+                  <button
+                    className="btn btn-sm btn-outline"
+                    disabled={state.update.status === "checking"}
+                    aria-busy={state.update.status === "checking"}
+                    onClick={onCheckUpdates}
+                  >
+                    {state.update.status === "checking" ? (
+                      <>
+                        <Dots /> Checking…
+                      </>
+                    ) : (
+                      "Check for updates"
+                    )}
+                  </button>
+                ) : null}
+                {onOpenReleaseNotes ? (
+                  <button className="btn btn-link" onClick={onOpenReleaseNotes}>
+                    Changelog
+                  </button>
+                ) : null}
+              </div>
+            </div>
+            {state.update.changelog ? (
+              <pre className="update-notes" aria-label="Release changelog">
+                {state.update.changelog}
+              </pre>
+            ) : null}
+          </div>
+        ) : null}
       </div>
       <div className="view-foot settings-foot">
         <span className="setting-value" title="Agent37 account">
@@ -179,9 +266,13 @@ export function SettingsView({ state, onSave, onAddMcp, onQuit, onBack }: Props)
           {email && plan && " · "}
           {plan}
         </span>
-        <button className="btn btn-sm btn-quiet" onClick={onQuit}>
-          Quit t3agent37
-        </button>
+        {onQuit ? (
+          <button className="btn btn-sm btn-quiet" onClick={onQuit}>
+            Quit t3agent37
+          </button>
+        ) : (
+          <span className="setting-value">daemon · managed by supervisor</span>
+        )}
       </div>
     </div>
   );

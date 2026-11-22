@@ -1,8 +1,8 @@
 //! Signing an agent in on a machine with the vendor's own CLI login. The login runs on the
-//! machine and its localhost callback port is forwarded to this computer via Agent37's
-//! authenticated WebSocket SSH tunnel (`agent37 ssh <id> -- -N -L ...`), so the browser's
-//! redirect after "Authorize" lands on the machine: no code to paste, and the credential stays
-//! on the machine. This computer's own logins are never touched.
+//! machine and its localhost callback port is forwarded to this computer over Agent37's
+//! authenticated HTTPS preview proxy (`Agent37::forward`), so the browser's redirect after
+//! "Authorize" lands on the machine: no code to paste, no external CLI required, and the
+//! credential stays on the machine. This computer's own logins are never touched.
 
 use super::MachineRuntime;
 use crate::proxy::upstream;
@@ -46,6 +46,31 @@ impl Agent {
 
 impl MachineRuntime {
     pub async fn sign_in(&self, agent: Agent) -> Result<()> {
+        // Cancel any prior in-flight OAuth sign-in so its local callback port (e.g. 1455)
+        // is immediately released before starting a new attempt.
+        let prev = self.shared.sign_in_cancel.lock().unwrap().take();
+        if let Some((cancel_tx, done_rx)) = prev {
+            let _ = cancel_tx.send(());
+            let _ = tokio::time::timeout(Duration::from_secs(5), done_rx).await;
+        }
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        *self.shared.sign_in_cancel.lock().unwrap() = Some((cancel_tx, done_rx));
+
+        struct SignInGuard {
+            shared: std::sync::Arc<super::Shared>,
+            done_tx: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+        impl Drop for SignInGuard {
+            fn drop(&mut self) {
+                self.shared.set_sign_in_url(None);
+                if let Some(tx) = self.done_tx.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+        let _guard = SignInGuard { shared: self.shared.clone(), done_tx: Some(done_tx) };
+
         self.ensure_awake().await?;
         let id = self.sandbox_id();
         let a37 = &self.shared.agent37;
@@ -56,18 +81,19 @@ impl MachineRuntime {
                 &format!(
                     "d=$(mktemp -d); printf '#!/bin/sh\\necho \"$1\" > %s/url\\n' \"$d\" > \"$d/browser\"; \
                      chmod +x \"$d/browser\"; \
-                     PATH=\"$HOME/.local/bin:$PATH\" BROWSER=\"$d/browser\" nohup script -qfec '{}' \"$d/log\" >/dev/null 2>&1 & echo \"$d\"",
+                     nohup sh -c 'PATH=\"$HOME/.local/bin:$PATH\" BROWSER=\"$1/browser\" script -qfec \"$2\" \"$1/log\" >/dev/null 2>&1; echo $? > \"$1/done\"' _ \"$d\" '{}' </dev/null >/dev/null 2>&1 & echo \"$d\"",
                     agent.login()
                 ),
                 30,
             )
             .await?;
         let dir = super::github::validate_tmp_dir(dir.lines().last().unwrap_or_default().trim())?;
-        let result = self.kept_awake(self.finish_sign_in(agent, &dir)).await;
+        let result = self.kept_awake(self.finish_sign_in(agent, &dir, &mut cancel_rx)).await;
         let pattern = format!("[{}]{}", &agent.login()[..1], &agent.login()[1..]);
         let _ = a37
             .exec(&id, &format!("rm -rf '{dir}'; pkill -f '{pattern}' 2>/dev/null || true"), None, 30)
             .await;
+        drop(_guard);
         result?;
         let refreshed = upstream::call_with_headers(
             &self.upstream_url(),
@@ -80,11 +106,17 @@ impl MachineRuntime {
         if let Ok(result) = refreshed {
             self.cache.lock().unwrap().fold_providers(&result["providers"]);
             self.save_cache();
+            self.shared.changed();
         }
         Ok(())
     }
 
-    async fn finish_sign_in(&self, agent: Agent, dir: &str) -> Result<()> {
+    async fn finish_sign_in(
+        &self,
+        agent: Agent,
+        dir: &str,
+        cancel_rx: &mut tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<()> {
         let id = self.sandbox_id();
         let a37 = &self.shared.agent37;
         let started = Instant::now();
@@ -96,24 +128,45 @@ impl MachineRuntime {
             if started.elapsed() > URL_TIMEOUT {
                 bail!("the {agent:?} login did not start on the machine");
             }
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            tokio::select! {
+                _ = &mut *cancel_rx => bail!("the {agent:?} sign-in was replaced by a newer attempt"),
+                _ = tokio::time::sleep(Duration::from_millis(300)) => {}
+            }
         };
         let port = validated_oauth_callback(agent, &url)
             .ok_or_else(|| anyhow!("unexpected or invalid {agent:?} login URL"))?;
-        let _forward = a37
+        let forward = a37
             .forward(&id, port)
             .await
             .with_context(|| format!("forwarding port {port} for the {agent:?} login"))?;
-        crate::app::open_url(&url)?;
-        loop {
-            tokio::time::sleep(Duration::from_secs(3)).await;
+        self.shared.set_sign_in_url(Some(url.clone()));
+        self.shared.notify(
+            format!("{agent:?} sign-in for {}", self.record().name),
+            "Complete authentication in the opened browser tab.".to_owned(),
+        );
+        if let Err(e) = crate::app::open_url(&url) {
+            tracing::warn!("could not auto-open browser for {agent:?} sign-in: {e:#}");
+        }
+        let outcome = loop {
+            tokio::select! {
+                _ = &mut *cancel_rx => break Err(anyhow!("the {agent:?} sign-in was replaced by a newer attempt")),
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+            }
             if a37.exec(&id, agent.status(), None, 30).await?.exit_code == Some(0) {
-                return Ok(());
+                break Ok(());
+            }
+            if a37.exec(&id, &format!("test -f '{dir}/done'"), None, 20).await?.exit_code == Some(0) {
+                if a37.exec(&id, agent.status(), None, 30).await?.exit_code == Some(0) {
+                    break Ok(());
+                }
+                break Err(anyhow!("the {agent:?} sign-in ended before completing"));
             }
             if started.elapsed() > LOGIN_TIMEOUT {
-                bail!("the {agent:?} sign-in was not finished in the browser");
+                break Err(anyhow!("the {agent:?} sign-in was not finished in the browser"));
             }
-        }
+        };
+        forward.stop().await;
+        outcome
     }
 }
 

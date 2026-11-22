@@ -1,11 +1,13 @@
 {
   "name": "t3boat",
+  "version": "0.2.0",
   "private": true,
   "workspaces": ["apps/*"],
   "scripts": {
     "dev": "bun --filter @t3boat/web dev",
     "dev:desktop": "bun --filter @t3boat/desktop tauri dev",
     "build": "bun --filter '*' build",
-    "build:desktop": "bun --filter @t3boat/desktop tauri build"
+    "build:desktop": "bun --filter @t3boat/desktop tauri build",
+    "release:verify": "node scripts/release-notes.mjs --verify"
   }
 }

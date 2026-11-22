@@ -102,6 +102,24 @@ export interface Size {
 
 export type McpClient = "claudeCode" | "codex";
 
+export type UpdateStatus = "idle" | "checking" | "available" | "upToDate" | "downloading" | "installing" | "error";
+
+export interface UpdateInfo {
+  currentVersion: string;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  releaseUrl: string | null;
+  changelog: string | null;
+  publishedAt: string | null;
+  assetName: string | null;
+  assetUrl: string | null;
+  checksumsUrl: string | null;
+  canSelfUpdate: boolean;
+  status: UpdateStatus;
+  error: string | null;
+  checkedAt: number | null;
+}
+
 export interface Costs {
   today: number;
   month: number;
@@ -118,6 +136,8 @@ export interface UiState {
   setupBusy: boolean;
   /** while a GitHub device sign-in waits: the code its page asks for */
   signInCode: string | null;
+  /** while an agent OAuth sign-in waits: browser URL fallback */
+  signInUrl?: string | null;
   account: { identifier: string | null; plan: string | null } | null;
   machines: MachineView[];
   costs: Costs;
@@ -125,6 +145,8 @@ export interface UiState {
   sizes: Size[];
   /** null = that CLI isn't installed */
   mcp: Record<McpClient, boolean | null>;
+  /** Latest GitHub Release check / install status */
+  update?: UpdateInfo;
 }
 
 export interface MachineDetails {
@@ -170,6 +192,9 @@ export interface Commands {
   add_mcp: [{ client: McpClient }, void];
   update_settings: [{ settings: Settings }, void];
   setup_action: [{ action: SetupAction }, void];
+  check_for_updates: [undefined, UpdateInfo];
+  install_update: [undefined, void];
+  open_release_notes: [undefined, void];
   quit_app: [undefined, void];
 }
 

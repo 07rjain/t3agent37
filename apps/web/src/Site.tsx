@@ -1,3 +1,4 @@
+import { Analytics } from "@vercel/analytics/react";
 import { Together } from "./Together";
 import { Hero } from "./Hero";
 import { Relay } from "./Relay";
@@ -123,6 +124,7 @@ export function Site() {
           <p>Not affiliated with or endorsed by T3 Code or Agent37.</p>
         </div>
       </footer>
+      <Analytics />
     </>
   );
 }

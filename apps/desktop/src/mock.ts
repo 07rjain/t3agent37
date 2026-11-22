@@ -171,6 +171,7 @@ function seed(): UiState {
     setup: (params.get("setup") as Setup | null) ?? "ready",
     setupBusy: params.get("busy") === "1",
     signInCode: null,
+    signInUrl: null,
     account: { identifier: "you@example.com", plan: "Pro" },
     machines: structuredClone(machines),
     costs: tally(
@@ -180,6 +181,38 @@ function seed(): UiState {
     settings: { startAtLogin: true, template: "agent37-base", autoSleepFuseMinutes: 120 },
     mcp: params.get("mcp") === "mixed" ? { claudeCode: true, codex: null } : { claudeCode: false, codex: false },
     sizes: SIZES,
+    update:
+      params.get("update") === "1"
+        ? {
+            currentVersion: "0.2.0",
+            latestVersion: "0.2.1",
+            updateAvailable: true,
+            releaseUrl: "https://github.com/07rjain/t3agent37/releases/tag/v0.2.1",
+            changelog: "### Fixed\n- Faster Agent37 provisioning and automatic update checks.",
+            publishedAt: new Date().toISOString(),
+            assetName: "t3agent37-macos-aarch64.app.tar.gz",
+            assetUrl: "https://github.com/07rjain/t3agent37/releases/download/v0.2.1/t3agent37-macos-aarch64.app.tar.gz",
+            checksumsUrl: "https://github.com/07rjain/t3agent37/releases/download/v0.2.1/SHA256SUMS.txt",
+            canSelfUpdate: true,
+            status: "available",
+            error: null,
+            checkedAt: Math.floor(Date.now() / 1000),
+          }
+        : {
+            currentVersion: "0.2.0",
+            latestVersion: "0.2.0",
+            updateAvailable: false,
+            releaseUrl: "https://github.com/07rjain/t3agent37/releases",
+            changelog: null,
+            publishedAt: null,
+            assetName: null,
+            assetUrl: null,
+            checksumsUrl: null,
+            canSelfUpdate: false,
+            status: "upToDate",
+            error: null,
+            checkedAt: Math.floor(Date.now() / 1000),
+          },
   };
 }
 
@@ -470,6 +503,61 @@ function create(): MockBackend {
       state.setupBusy = false;
       if (action === "recheck" || action === state.setup) nextStep();
       emit();
+    },
+
+    async check_for_updates() {
+      const current = state.update?.currentVersion ?? "0.2.0";
+      state.update = {
+        ...(state.update ?? {
+          currentVersion: current,
+          latestVersion: current,
+          updateAvailable: false,
+          releaseUrl: "https://github.com/07rjain/t3agent37/releases",
+          changelog: null,
+          publishedAt: null,
+          assetName: null,
+          assetUrl: null,
+          checksumsUrl: null,
+          canSelfUpdate: false,
+          status: "idle",
+          error: null,
+          checkedAt: null,
+        }),
+        status: "checking",
+        error: null,
+      };
+      emit();
+      await wait(450);
+      const next = {
+        ...state.update,
+        status: state.update.updateAvailable ? ("available" as const) : ("upToDate" as const),
+        checkedAt: Math.floor(Date.now() / 1000),
+      };
+      state.update = next;
+      emit();
+      return next;
+    },
+
+    async install_update() {
+      if (!state.update) return;
+      state.update = { ...state.update, status: "downloading", error: null };
+      emit();
+      await wait(700);
+      state.update = { ...state.update, status: "installing" };
+      emit();
+      await wait(500);
+      const latest = state.update.latestVersion ?? state.update.currentVersion;
+      state.update = {
+        ...state.update,
+        currentVersion: latest,
+        updateAvailable: false,
+        status: "upToDate",
+      };
+      emit();
+    },
+
+    async open_release_notes() {
+      console.info("[mock] open_release_notes", state.update?.releaseUrl);
     },
 
     async quit_app() {

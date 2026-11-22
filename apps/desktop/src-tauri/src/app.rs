@@ -194,6 +194,7 @@ impl App {
                 .pool_idle_timeout(Duration::from_secs(30))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
+            sign_in_cancel: Mutex::new(None),
         });
         let app = Arc::new(Self {
             shared,
@@ -409,9 +410,15 @@ impl App {
     }
 
     fn set_creating_step(&self, name: &str, step: &str) {
-        if let Some(c) = self.creating.lock().unwrap().iter_mut().find(|c| c.name == name) {
-            c.step = step.to_owned();
+        let mut creating = self.creating.lock().unwrap();
+        let Some(c) = creating.iter_mut().find(|c| c.name == name) else {
+            return;
+        };
+        if c.step == step {
+            return;
         }
+        c.step = step.to_owned();
+        drop(creating);
         self.shared.changed();
     }
 
@@ -478,6 +485,10 @@ impl App {
         self.shared.changed();
         if failed {
             self.reaper.notify_one();
+        }
+        if let Err(ref e) = result {
+            tracing::error!("creating machine {name} failed: {e:#}");
+            self.shared.notify(format!("Couldn't create {name}"), format!("{e:#}"));
         }
         let machine = result?;
         let (app, m) = (self.clone(), machine.clone());

@@ -27,7 +27,8 @@
     border-color 120ms ease;
 }
 .ocean.is-compact .brand,
-.ocean.is-compact .btn-on-sea {
+.ocean.is-compact .btn-on-sea,
+.ocean.is-compact .sea-actions {
   transform: translateY(-48px);
   visibility: hidden;
 }

@@ -40,12 +40,16 @@ interface Props {
   sizes: Size[];
   /** while a GitHub device sign-in waits: the code its page asks for */
   signInCode: string | null;
+  /** while an agent OAuth sign-in waits: clickable browser login URL */
+  signInUrl: string | null;
   /** latest UiState; every new one triggers a details refetch */
   version: unknown;
   pending: string | null;
   deleteError: string | null;
   /** opened from the row's "Add a project…" or "Add one": start with the project picker open */
   pickProject: boolean;
+  /** hide back button when shown beside the fleet roster in desktop web mode */
+  hideBack?: boolean;
   onAction: (a: Action) => void;
   onAddProject: (p: LocalProject) => void;
   onDismissDeleteError: () => void;
@@ -57,10 +61,12 @@ export function MachineDetails({
   machine: m,
   sizes,
   signInCode,
+  signInUrl,
   version,
   pending,
   deleteError,
   pickProject,
+  hideBack,
   onAction,
   onAddProject,
   onDismissDeleteError,
@@ -79,12 +85,21 @@ export function MachineDetails({
 
   return (
     <div className={`view details state-${m.state}`}>
-      <SubHeader title={m.name} onBack={onBack} />
+      {hideBack ? (
+        <div className="subheader is-static">
+          <span className="subheader-kicker">DOSSIER</span>
+          <h2>{m.name}</h2>
+          <span className="chip">{m.size}</span>
+          <span className="chip">{m.region}</span>
+        </div>
+      ) : (
+        <SubHeader title={m.name} onBack={onBack} />
+      )}
       <div className="view-body details-body">
         <Glance m={m} size={sizeOf(sizes, m.size)} d={d} />
         {gone ? null : <Power m={m} busy={busy} onAction={onAction} />}
         {gone ? null : <Disk m={m} usage={d?.diskUsage ?? m.diskUsage} sizes={sizes} busy={busy} onAction={onAction} />}
-        <Agents m={m} d={d} pending={pending} onAction={onAction} />
+        <Agents m={m} d={d} signInUrl={signInUrl} pending={pending} onAction={onAction} />
         <GitHub m={m} signedIn={m.githubSignedIn || !!d?.githubSignedIn} signInCode={signInCode} pending={pending} onAction={onAction} />
         <Connect m={m} d={d} pending={pending} onAction={onAction} />
         <Projects m={m} pickProject={pickProject} onAddProject={onAddProject} />
@@ -413,54 +428,73 @@ function GitHub({
 function Agents({
   m,
   d,
+  signInUrl,
   pending,
   onAction,
 }: {
   m: MachineView;
   d: Details | null;
+  signInUrl: string | null;
   pending: string | null;
   onAction: (a: Action) => void;
 }) {
   const [signingIn, setSigningIn] = useState<string | null>(null);
+  useEffect(() => {
+    if (!pending) setSigningIn(null);
+  }, [pending]);
+  const safeSignInUrl = signInUrl && signInUrl.startsWith("https://") ? signInUrl : null;
+  const anySigningIn = pending === signInTo("Codex").busy;
   return (
     <Section title="agents">
       <ul className="lines">
         {d ? (
-          d.agents.map((a) => {
-            const running = signingIn === a.name && pending === signInTo(a.name).busy;
-            return (
-              <li key={a.name} className="line">
-                <span className="line-main">
-                  <AgentName name={a.name} />
-                </span>
-                {a.signedIn ? (
-                  <span className="line-ok">
-                    <Icon name="check" size={10} /> signed in
+          <>
+            {d.agents.map((a) => {
+              const running = signingIn === a.name && pending === signInTo(a.name).busy;
+              return (
+                <li key={a.name} className="line">
+                  <span className="line-main">
+                    <AgentName name={a.name} />
                   </span>
-                ) : m.signedOut.includes(a.name) ? (
-                  <button
-                    className="btn btn-sm btn-outline"
-                    disabled={!!pending || m.state === "missing"}
-                    aria-busy={running}
-                    onClick={() => {
-                      setSigningIn(a.name);
-                      onAction(signInTo(a.name));
-                    }}
-                  >
-                    {running ? (
-                      <>
-                        <Dots /> Signing in…
-                      </>
-                    ) : (
-                      "Sign in"
-                    )}
-                  </button>
-                ) : (
-                  <span className="caption">signed out</span>
-                )}
+                  {a.signedIn ? (
+                    <span className="line-ok">
+                      <Icon name="check" size={10} /> signed in
+                    </span>
+                  ) : m.signedOut.includes(a.name) ? (
+                    <button
+                      className="btn btn-sm btn-outline"
+                      disabled={!!pending || m.state === "missing"}
+                      aria-busy={running}
+                      onClick={() => {
+                        setSigningIn(a.name);
+                        onAction(signInTo(a.name));
+                      }}
+                    >
+                      {running ? (
+                        <>
+                          <Dots /> Signing in…
+                        </>
+                      ) : (
+                        "Sign in"
+                      )}
+                    </button>
+                  ) : (
+                    <span className="caption">signed out</span>
+                  )}
+                </li>
+              );
+            })}
+            {anySigningIn && safeSignInUrl ? (
+              <li className="line">
+                <span className="line-main line-dim">
+                  Finish sign-in in your browser:{" "}
+                  <a href={safeSignInUrl} target="_blank" rel="noopener noreferrer" className="btn btn-link">
+                    Open sign-in page
+                  </a>
+                </span>
               </li>
-            );
-          })
+            ) : null}
+          </>
         ) : (
           <Skeleton rows={2} />
         )}

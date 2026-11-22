@@ -10,6 +10,7 @@ import { MachineDetails } from "./components/MachineDetails";
 import { SetupView } from "./components/SetupView";
 import { Costs } from "./components/Costs";
 import { Icon } from "./components/Icons";
+import { WebConsole } from "./components/WebConsole";
 
 /** "machine:<id>" = that machine's details */
 type View = "list" | "new" | "settings" | `machine:${string}`;
@@ -61,7 +62,9 @@ export default function App() {
   }, [state, show]);
 
   let body;
-  if (loadError) {
+  if (inWebDaemon) {
+    body = <WebConsole state={state} loadError={loadError} retry={retry} toast={show} />;
+  } else if (loadError) {
     body = (
       <div className="view center">
         <p className="lede">Couldn't reach t3agent37: {loadError}</p>
@@ -224,6 +227,24 @@ function Ready({ state, toast }: { state: UiState; toast: (t: string, tone?: "er
 
   const addMcp = (client: McpClient) => call("add_mcp", { client }).catch((e) => toast(errorText(e)));
 
+  const update = state.update;
+  const updateBusy =
+    update?.status === "checking" || update?.status === "downloading" || update?.status === "installing";
+  const checkUpdates = () =>
+    call("check_for_updates", undefined)
+      .then((info) => {
+        if (info.updateAvailable && info.latestVersion) {
+          toast(`v${info.latestVersion} available — click Update to install`, "info");
+        } else {
+          toast(`Up to date (v${info.currentVersion})`, "info");
+        }
+      })
+      .catch((e) => toast(errorText(e)));
+  const installUpdate = () =>
+    call("install_update", undefined).catch((e) => toast(errorText(e)));
+  const openReleaseNotes = () =>
+    call("open_release_notes", undefined).catch((e) => toast(errorText(e)));
+
   const create = (spec: NewMachineSpec) => {
     setView("list");
     call("create_machine", spec).catch((e) => toast(errorText(e)));
@@ -238,10 +259,63 @@ function Ready({ state, toast }: { state: UiState; toast: (t: string, tone?: "er
         onPick={view === "new" ? undefined : pick}
       >
         <Brand />
-        <button className="btn btn-icon btn-on-sea" onClick={() => setView("settings")} aria-label="Settings">
-          <Icon name="sliders" />
-        </button>
+        <div className="sea-actions">
+          <button
+            className={`btn btn-on-sea${update?.updateAvailable ? " is-update" : " btn-icon"}`}
+            disabled={updateBusy}
+            aria-busy={updateBusy}
+            onClick={() => (update?.updateAvailable ? installUpdate() : checkUpdates())}
+            title={
+              update?.updateAvailable
+                ? `Update app to v${update.latestVersion ?? "latest"}`
+                : `Check for updates (v${update?.currentVersion ?? "0.2.0"})`
+            }
+            aria-label={update?.updateAvailable ? "Update app" : "Check for updates"}
+          >
+            <Icon name="download" size={14} />
+            {update?.updateAvailable ? (
+              <span>
+                {update.status === "downloading"
+                  ? "Downloading…"
+                  : update.status === "installing"
+                    ? "Installing…"
+                    : `Update v${update.latestVersion}`}
+              </span>
+            ) : null}
+          </button>
+          <button className="btn btn-icon btn-on-sea" onClick={() => setView("settings")} aria-label="Settings">
+            <Icon name="sliders" />
+          </button>
+        </div>
       </Ocean>
+
+      {update?.updateAvailable && view === "list" && !selected ? (
+        <div className="update-banner" role="status">
+          <span className="update-banner-text">
+            <span className="update-banner-dot" aria-hidden />
+            <span>
+              v{update.latestVersion} available
+            </span>
+          </span>
+          <div className="update-banner-actions">
+            <button className="btn btn-link" onClick={() => setView("settings")}>
+              Changelog
+            </button>
+            <button
+              className="btn btn-sm btn-solid"
+              disabled={updateBusy}
+              aria-busy={updateBusy}
+              onClick={installUpdate}
+            >
+              {update.status === "downloading"
+                ? "Downloading…"
+                : update.status === "installing"
+                  ? "Installing…"
+                  : "Update app"}
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {selected ? (
         <MachineDetails
@@ -249,6 +323,7 @@ function Ready({ state, toast }: { state: UiState; toast: (t: string, tone?: "er
           machine={selected}
           sizes={state.sizes}
           signInCode={state.signInCode}
+          signInUrl={state.signInUrl ?? null}
           version={state}
           pending={pending[machineKey(selected)] ?? null}
           deleteError={deleteErrors[machineKey(selected)] ?? null}
@@ -266,6 +341,9 @@ function Ready({ state, toast }: { state: UiState; toast: (t: string, tone?: "er
           state={state}
           onSave={(settings) => call("update_settings", { settings }).catch((e) => toast(errorText(e)))}
           onAddMcp={addMcp}
+          onCheckUpdates={checkUpdates}
+          onInstallUpdate={installUpdate}
+          onOpenReleaseNotes={openReleaseNotes}
           onQuit={() => call("quit_app", undefined).catch((e) => toast(errorText(e)))}
           onBack={back}
         />

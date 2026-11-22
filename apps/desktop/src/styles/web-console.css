@@ -1,0 +1,766 @@
+/* ── Desktop Web Console (http://127.0.0.1:47730) ───────────
+ * Extends the Agent37 007 Noir landing page design system:
+ * square corners, 1px frames, hard offset shadows, crimson CTA,
+ * [37] wordmark badge, animated gun-barrel ASCII hero, and dossier chips.
+ * Scoped strictly to `.web-shell` so Tauri & demo iframes stay compact.
+ */
+
+body:has(.web-shell) {
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: #08090d;
+}
+
+.web-shell {
+  min-height: 100%;
+  height: auto;
+  width: 100%;
+  display: block;
+  padding: 0;
+  background: #08090d;
+}
+
+.app.is-web {
+  width: 100%;
+  height: auto;
+  min-height: 100vh;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  overflow: visible;
+  background: #08090d;
+}
+
+.wc-page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: #08090d;
+  color: var(--fg);
+}
+
+/* ── Full-bleed 007 gun-barrel banner ───────────────────── */
+
+.wc-banner {
+  position: relative;
+  width: 100%;
+  min-height: 196px;
+  overflow: hidden;
+  background: #07080b;
+  border-bottom: 1px solid #232734;
+}
+
+.wc-stage-bg {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: #07080b;
+}
+
+.wc-stage-bg canvas {
+  display: block;
+}
+
+.wc-scanlines {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.028) 0px,
+    rgba(255, 255, 255, 0.028) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+.wc-banner-inner {
+  position: relative;
+  z-index: 1;
+  width: min(1280px, 100% - 48px);
+  margin-inline: auto;
+  padding: 20px 0 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.wc-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.wc-wordmark-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.wc-wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  font: 600 30px/1 var(--font-display);
+  letter-spacing: -0.03em;
+  color: #f4f4f5;
+}
+
+.wc-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1.5px solid #dc2626;
+  background: #0b0d13;
+  color: #f4f4f5;
+  font: 700 16px/1 var(--font-mono);
+  letter-spacing: -0.04em;
+  box-shadow: 3px 3px 0 #450a0a;
+}
+
+.wc-badge.is-sm {
+  width: 24px;
+  height: 24px;
+  font-size: 11px;
+  box-shadow: 2px 2px 0 #450a0a;
+}
+
+.wc-live-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 9px;
+  border: 1px solid rgba(16, 185, 129, 0.55);
+  background: rgba(9, 11, 16, 0.88);
+  color: #34d399;
+  font: 500 11px/1 var(--font-mono);
+  letter-spacing: 0.08em;
+}
+
+.wc-live-badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  background: #10b981;
+  box-shadow: 0 0 8px #10b981;
+  animation: wc-blink 1.4s steps(1) infinite;
+}
+
+.wc-live-badge.is-offline {
+  border-color: rgba(239, 68, 68, 0.6);
+  color: #f87171;
+}
+
+.wc-live-badge.is-offline::before {
+  background: #ef4444;
+  box-shadow: 0 0 8px #ef4444;
+}
+
+@keyframes wc-blink {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.wc-nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.wc-endpoint {
+  padding: 6px 10px;
+  background: rgba(11, 13, 19, 0.84);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  font: 400 12px/1 var(--font-mono);
+  color: #a1a1aa;
+}
+
+/* Landing-page style framed mono nav button */
+.wc-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 14px;
+  border: 1px solid var(--frame);
+  border-radius: 0;
+  background: rgba(11, 13, 19, 0.88);
+  color: #f4f4f5;
+  font: 500 13px/1 var(--font-mono);
+  cursor: pointer;
+  box-shadow: 3px 3px 0 #000;
+  transition:
+    transform 120ms ease,
+    box-shadow 120ms ease,
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.wc-nav-btn .icon {
+  fill: currentColor;
+}
+
+.wc-nav-btn:hover {
+  background: #f4f4f5;
+  color: #090b10;
+  border-color: #f4f4f5;
+  transform: translate(-1px, -1px);
+  box-shadow: 4px 4px 0 #000;
+}
+
+.wc-nav-btn.is-active {
+  border-color: #dc2626;
+  color: #f87171;
+  background: rgba(24, 15, 18, 0.96);
+}
+
+.wc-nav-btn:active {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0 #000;
+}
+
+/* Landing-page crimson CTA (.hero-bond .install) */
+.wc-cta-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 0;
+  background: #dc2626;
+  color: #ffffff;
+  font: 500 13.5px/1 var(--font-body);
+  cursor: pointer;
+  box-shadow: 4px 4px 0 #450a0a;
+  transition:
+    transform 120ms ease,
+    background-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.wc-cta-btn .icon {
+  fill: currentColor;
+}
+
+.wc-cta-btn:hover {
+  background: #ef4444;
+  transform: translate(-1px, -1px);
+  box-shadow: 5px 5px 0 #450a0a;
+}
+
+.wc-cta-btn:active {
+  transform: translate(3px, 3px);
+  box-shadow: 1px 1px 0 #450a0a;
+}
+
+.wc-hero-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.wc-kicker {
+  font: 500 11.5px/1 var(--font-mono);
+  letter-spacing: 0.14em;
+  color: #f87171;
+}
+
+/* Landing-page dossier chips */
+.wc-dossier {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.wc-page .dossier-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 11px;
+  background: rgba(12, 14, 20, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(6px);
+  font: 400 12px/1 var(--font-mono);
+  color: #e4e4e7;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.wc-page button.dossier-chip {
+  cursor: pointer;
+}
+
+.wc-page button.dossier-chip:hover,
+.wc-page .dossier-chip.is-active {
+  border-color: #dc2626;
+  background: rgba(24, 15, 18, 0.96);
+}
+
+.wc-page .dossier-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #71717a;
+  flex: none;
+}
+
+.wc-page .dossier-chip.is-working .dossier-dot {
+  background: #10b981;
+  box-shadow: 0 0 8px #10b981;
+}
+
+.wc-page .dossier-chip.is-waking .dossier-dot,
+.wc-page .dossier-chip.is-creating .dossier-dot,
+.wc-page .dossier-chip.is-error .dossier-dot {
+  background: #ef4444;
+  box-shadow: 0 0 8px #ef4444;
+}
+
+.wc-page .dossier-chip.is-idle .dossier-dot {
+  background: #e4e4e7;
+}
+
+.wc-page .dossier-chip.is-sleeping .dossier-dot {
+  background: #f59e0b;
+}
+
+.wc-page .dossier-code {
+  color: #f87171;
+  font-weight: 600;
+}
+
+.wc-page .dossier-name {
+  font-weight: 600;
+  color: #fafafa;
+}
+
+.wc-page .dossier-meta {
+  color: #9ca3af;
+}
+
+/* ── Main desktop container ─────────────────────────────── */
+
+.wc-shell {
+  flex: 1;
+  width: min(1280px, 100% - 48px);
+  margin: 24px auto 0;
+  padding-bottom: 36px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+/* ── KPI telemetry bar (4 framed cards) ─────────────────── */
+
+.wc-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.wc-kpi {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px 18px 15px;
+  background: #0d0f16;
+  border: 1px solid var(--frame);
+  box-shadow: 4px 4px 0 #000000;
+}
+
+.wc-kpi-label {
+  font: 500 10.5px/1 var(--font-mono);
+  letter-spacing: 0.1em;
+  color: var(--muted);
+}
+
+.wc-kpi-value {
+  font: 600 26px/1.1 var(--font-display);
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+
+.wc-kpi-of {
+  font: 400 14px/1 var(--font-mono);
+  color: var(--muted);
+}
+
+.wc-kpi-sub {
+  font: 400 11.5px/1.2 var(--font-mono);
+  color: var(--muted);
+}
+
+.wc-kpi.is-warn {
+  border-color: rgba(239, 68, 68, 0.7);
+}
+
+.wc-kpi.is-warn .wc-kpi-value {
+  color: var(--danger);
+}
+
+.wc-kpi-bar {
+  height: 5px;
+  margin-top: 4px;
+  background: #171a24;
+  border: 1px solid var(--line);
+}
+
+.wc-kpi-bar i {
+  display: block;
+  height: 100%;
+  background: #dc2626;
+  transition: width 220ms ease;
+}
+
+.wc-kpi.is-warn .wc-kpi-bar i {
+  background: var(--danger);
+}
+
+/* ── Master-detail desktop workbench ────────────────────── */
+
+.wc-grid {
+  display: grid;
+  grid-template-columns: minmax(340px, 430px) minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.wc-card {
+  background: #0b0d13;
+  border: 1px solid var(--frame);
+  box-shadow: 6px 6px 0 #000000;
+  min-width: 0;
+}
+
+.wc-roster {
+  display: flex;
+  flex-direction: column;
+}
+
+.wc-card-head {
+  padding: 12px 16px;
+  background: #11131a;
+  border-bottom: 1px solid var(--line);
+}
+
+.wc-card-head .caption {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+
+.wc-roster-list {
+  max-height: calc(100vh - 340px);
+  min-height: 220px;
+}
+
+.wc-roster-empty {
+  padding: 36px 24px;
+}
+
+/* Desktop polish inside MachineRow */
+.wc-page .row {
+  padding: 13px 14px 13px 16px;
+  column-gap: 14px;
+}
+
+.wc-page .row.is-selected {
+  background: #141722;
+  box-shadow: inset 3px 0 0 #dc2626;
+}
+
+.wc-page .row-name {
+  font-size: 15px;
+}
+
+.wc-page .row-detail {
+  font-size: 11.5px;
+}
+
+.wc-page .row-note {
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+
+.wc-page .row-note-text {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+}
+
+/* ── Inspector / Right Workspace ────────────────────────── */
+
+.wc-inspector {
+  display: flex;
+  flex-direction: column;
+  min-height: 480px;
+}
+
+.wc-inspector .view {
+  animation: none;
+}
+
+.wc-inspector .subheader {
+  padding: 14px 20px;
+  gap: 10px;
+  background: #11131a;
+  border-bottom: 1px solid var(--line);
+}
+
+.wc-inspector .subheader.is-static {
+  padding-left: 22px;
+}
+
+.wc-inspector .subheader-kicker {
+  padding: 3px 6px;
+  border: 1px solid rgba(220, 38, 38, 0.55);
+  color: #f87171;
+  font: 500 10px/1 var(--font-mono);
+  letter-spacing: 0.1em;
+}
+
+.wc-inspector .subheader h2 {
+  font-size: 20px;
+  letter-spacing: -0.02em;
+}
+
+.wc-inspector .view-body {
+  padding: 20px 22px 16px;
+  gap: 22px;
+  overflow-y: visible;
+}
+
+.wc-inspector .view-foot {
+  padding: 14px 22px 18px;
+  background: #11131a;
+  border-top: 1px solid var(--line);
+}
+
+.wc-inspector .details-foot .btn-lg {
+  height: 42px;
+  font-size: 14px;
+}
+
+.wc-inspector .details-foot .btn-solid {
+  background: #dc2626;
+  color: #ffffff;
+  box-shadow: 4px 4px 0 #450a0a;
+}
+
+.wc-inspector .details-foot .btn-solid:hover:not(:disabled) {
+  background: #ef4444;
+}
+
+.wc-inspector .glance {
+  background: #0d0f16;
+  border-color: var(--frame);
+}
+
+.wc-inspector .glance-top {
+  padding: 16px 18px;
+  gap: 18px;
+}
+
+.wc-inspector .glance-state {
+  font-size: 19px;
+}
+
+.wc-inspector .glance-costs .cost {
+  padding: 11px 16px;
+}
+
+.wc-inspector .sizes {
+  grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+  gap: 10px;
+}
+
+.wc-inspector .size {
+  padding: 12px;
+}
+
+.wc-inspector .view-foot button[type="submit"].btn-solid {
+  background: #dc2626;
+  color: #ffffff;
+  box-shadow: 4px 4px 0 #450a0a;
+}
+
+.wc-inspector .view-foot button[type="submit"].btn-solid:hover:not(:disabled) {
+  background: #ef4444;
+}
+
+.wc-inspector .settings {
+  gap: 2px;
+}
+
+.wc-inspector .setting {
+  padding: 14px 0;
+}
+
+/* ── Mission Briefing (empty right panel) ───────────────── */
+
+.wc-briefing {
+  padding: 32px 28px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.wc-card-eyebrow {
+  font: 500 11px/1 var(--font-mono);
+  letter-spacing: 0.14em;
+  color: #f87171;
+}
+
+.wc-briefing-title {
+  font: 600 28px/1.12 var(--font-display);
+  letter-spacing: -0.025em;
+  max-width: 24ch;
+}
+
+.wc-briefing .lede {
+  max-width: 56ch;
+  font-size: 14px;
+}
+
+.wc-steps {
+  width: 100%;
+  margin: 8px 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.wc-steps li {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  background: #0d0f16;
+  border: 1px solid var(--line);
+}
+
+.wc-step-num {
+  font: 600 12px/1 var(--font-mono);
+  color: #f87171;
+}
+
+.wc-steps strong {
+  display: block;
+  margin-bottom: 4px;
+  font: 600 14px/1.2 var(--font-display);
+  color: var(--fg);
+}
+
+.wc-steps p {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+/* ── Setup / Error centered cards ───────────────────────── */
+
+.wc-center-wrap {
+  flex: 1;
+  width: min(560px, 100% - 48px);
+  margin: 40px auto;
+}
+
+.wc-status-card {
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.wc-setup-card {
+  padding: 8px;
+}
+
+/* ── Footer ─────────────────────────────────────────────── */
+
+.wc-footer {
+  margin-top: auto;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 24px;
+  font: 400 12px/1.4 var(--font-mono);
+  color: var(--muted);
+}
+
+.wc-footer-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font: 600 16px/1 var(--font-display);
+  color: var(--fg);
+  letter-spacing: -0.02em;
+}
+
+.wc-footer-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.wc-footer-meta .sep {
+  color: var(--frame);
+}
+
+/* ── Toast placement in full-screen desktop web mode ────── */
+
+.app.is-web .toast {
+  position: fixed;
+  left: auto;
+  right: 24px;
+  bottom: 24px;
+  max-width: min(440px, calc(100vw - 48px));
+  border: 1px solid var(--frame);
+}
+
+/* ── Responsive tablet / narrow viewport fallback ───────── */
+
+@media (max-width: 960px) {
+  .wc-banner-inner,
+  .wc-shell {
+    width: min(1280px, 100% - 32px);
+  }
+  .wc-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .wc-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .wc-roster-list {
+    max-height: none;
+    min-height: 0;
+  }
+  .wc-steps {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 560px) {
+  .wc-endpoint {
+    display: none;
+  }
+  .wc-kpis {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
