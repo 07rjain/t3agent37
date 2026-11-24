@@ -1,4 +1,7 @@
 {
+  "installCommand": "bun install --frozen-lockfile",
+  "buildCommand": "bun --filter @t3boat/web build",
+  "outputDirectory": "apps/web/dist",
   "routes": [
     {
       "src": "^/(.+)\\.md$",

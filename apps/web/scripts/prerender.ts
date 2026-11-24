@@ -10,6 +10,7 @@ const DESCRIPTION =
   "Run your T3 Code agents on pay-as-you-go Agent37 containers and VMs. Edge-authenticated localhost proxy, CRIU checkpoint sleep, live Web UI, and MCP server.";
 
 const web = join(import.meta.dir, "..");
+const repo = join(web, "..", "..");
 const dist = join(web, "dist");
 const ssr = join(web, "dist-ssr");
 
@@ -27,4 +28,10 @@ const pages = [{ path: "/", title: TITLE, description: DESCRIPTION, markdown: ht
 await Bun.write(join(dist, "index.md"), pages[0].markdown);
 await Bun.write(join(dist, "llms.txt"), llmsTxt(pages, { title: TITLE, description: DESCRIPTION, siteUrl: SITE }));
 await Bun.write(join(dist, "llms-full.txt"), llmsFullTxt(pages, { siteUrl: SITE }));
-await Bun.write(join(web, "vercel.json"), `${JSON.stringify(vercelRoutes(pages.map((page) => page.path)), null, 2)}\n`);
+const deployment = {
+  installCommand: "bun install --frozen-lockfile",
+  buildCommand: "bun --filter @t3boat/web build",
+  outputDirectory: "apps/web/dist",
+  ...vercelRoutes(pages.map((page) => page.path)),
+};
+await Bun.write(join(repo, "vercel.json"), `${JSON.stringify(deployment, null, 2)}\n`);
