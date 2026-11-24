@@ -35,11 +35,22 @@
   flex: none;
   padding: 10px 16px 14px;
 }
-.view-foot.privacy-actions {
-  flex-direction: row;
+.view-body.privacy-choice {
+  padding: 24px;
 }
-.privacy-actions .btn {
-  flex: 1;
+.privacy-content {
+  display: grid;
+  gap: 10px;
+  margin-block: auto;
+}
+.privacy-content .privacy-link {
+  justify-self: start;
+}
+.privacy-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: 8px;
+  margin-top: 8px;
 }
 .btn.privacy-link {
   align-self: flex-start;

@@ -13,29 +13,34 @@ export function TelemetryChoice({
   const [busy, setBusy] = useState(false);
   const choose = async (enabled: boolean) => {
     setBusy(true);
-    await onChoose(enabled);
-    setBusy(false);
+    try {
+      await onChoose(enabled);
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
-    <div className="view">
-      <div className="view-body">
-        <h1 className="display">Share usage and reliability data?</h1>
-        <p className="lede">{telemetrySummary}</p>
-        <p className="hint">This is optional. You can change your choice in Settings under Privacy.</p>
-        <button type="button" className="btn btn-link privacy-link" onClick={onPrivacy}>
-          Telemetry privacy details
-        </button>
+    <section className="view" aria-labelledby="telemetry-title">
+      <div className="view-body privacy-choice">
+        <div className="privacy-content">
+          <h1 className="display" id="telemetry-title">Share optional telemetry?</h1>
+          <p className="lede">{telemetrySummary}</p>
+          <p className="hint">You can change this anytime in Settings under Privacy.</p>
+          <button type="button" className="btn btn-link privacy-link" onClick={onPrivacy}>
+            Telemetry privacy details
+          </button>
+          <div className="privacy-actions">
+            <button type="button" className="btn btn-lg btn-quiet" disabled={busy} onClick={() => void choose(false)}>
+              Skip
+            </button>
+            <button type="button" className="btn btn-lg btn-solid" disabled={busy} onClick={() => void choose(true)}>
+              Share telemetry
+            </button>
+          </div>
+        </div>
       </div>
-      <div className="view-foot privacy-actions">
-        <button type="button" className="btn btn-outline" disabled={busy} onClick={() => void choose(false)}>
-          Skip
-        </button>
-        <button type="button" className="btn btn-outline" disabled={busy} onClick={() => void choose(true)}>
-          Share telemetry
-        </button>
-      </div>
-    </div>
+    </section>
   );
 }
 

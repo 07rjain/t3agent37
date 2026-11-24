@@ -4,6 +4,7 @@
 // ?projects=0|error (T3 Code has no projects with a remote / listing them fails)
 // ?ready=1 (a new machine comes up in T3 Code with its agents signed in and acme on it, as the website shows it)
 // ?disk=full (devbox's disk is nearly full)  ?wallet=low
+// ?telemetry=undecided (show the desktop consent screen)
 import { version as desktopVersion } from "../package.json";
 import type { Backend } from "./api";
 import { timeLapse } from "./pixel/clock";
@@ -184,14 +185,15 @@ function seed(): UiState {
     settings: { startAtLogin: true, template: "agent37-base", autoSleepFuseMinutes: 120 },
     mcp: params.get("mcp") === "mixed" ? { claudeCode: true, codex: null } : { claudeCode: false, codex: false },
     sizes: SIZES,
+    telemetry: params.get("telemetry") === "undecided" ? "undecided" : undefined,
     update:
       params.get("update") === "1"
         ? {
-            currentVersion: "0.2.0",
+            currentVersion: "0.3.0",
             latestVersion: desktopVersion,
             updateAvailable: true,
             releaseUrl: `${releasesUrl}/tag/v${desktopVersion}`,
-            changelog: "### Added\n- Optional desktop telemetry for setup, sleep and wake, and app updates.",
+            changelog: "### Fixed\n- The telemetry consent screen and full-width menu bar artwork.",
             publishedAt: new Date().toISOString(),
             assetName: "t3agent37-macos-aarch64.app.tar.gz",
             assetUrl: `${mockUpdateAssets}/t3agent37-macos-aarch64.app.tar.gz`,

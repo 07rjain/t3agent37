@@ -4,6 +4,11 @@ All notable changes to **t3agent37** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-11-24
+
+### Fixed
+- The telemetry consent screen uses the menu-bar header and controls. The Bond ASCII artwork fills the header width.
+
 ## [0.3.0] - 2026-11-24
 
 ### Added

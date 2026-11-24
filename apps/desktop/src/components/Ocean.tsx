@@ -24,6 +24,7 @@ interface Props {
 }
 
 const ASCII_RAMP = " .:-=+*#%@";
+const ASCII_FONT = '500 10px "IBM Plex Mono"';
 
 /**
  * Agent37 007 Gun-Barrel ASCII Header: renders an animated rifled barrel spiral in crisp
@@ -51,8 +52,6 @@ export function Ocean({ boats, active, compact, onPick, children }: Props) {
       h = el.clientHeight;
       cv.width = Math.max(1, Math.floor(w * dpr));
       cv.height = Math.max(1, Math.floor(h * dpr));
-      cv.style.width = `${w}px`;
-      cv.style.height = `${h}px`;
     };
 
     const draw = (t: number) => {
@@ -61,7 +60,10 @@ export function Ocean({ boats, active, compact, onPick, children }: Props) {
       ctx.fillStyle = "#07080b";
       ctx.fillRect(0, 0, w, h);
 
-      const cellW = 7;
+      ctx.font = `${ASCII_FONT}, ui-monospace, monospace`;
+      ctx.textBaseline = "top";
+      // Use the canvas font's real advance so the drawn rows reach both edges.
+      const cellW = ctx.measureText("M").width;
       const cellH = 11;
       const cols = Math.ceil(w / cellW);
       const rows = Math.ceil(h / cellH);
@@ -71,8 +73,7 @@ export function Ocean({ boats, active, compact, onPick, children }: Props) {
       const apertureR = Math.min(w, h) * 0.24;
       const spin = t * 0.55;
 
-      ctx.font = `500 10px "IBM Plex Mono", ui-monospace, monospace`;
-      ctx.textBaseline = "top";
+      const edgeDistance = Math.hypot(Math.max(cx, w - cx), Math.max(cy, h - cy));
 
       for (let r = 0; r < rows; r++) {
         const py = r * cellH;
@@ -94,11 +95,11 @@ export function Ocean({ boats, active, compact, onPick, children }: Props) {
           } else {
             // Rifled spiral grooves radiating out from the aperture
             const angle = Math.atan2(dy, dx);
-            const radial = (dist - apertureR) / Math.max(w * 0.55, 1);
+            const radial = (dist - apertureR) / Math.max(edgeDistance - apertureR, 1);
             const groove = Math.sin(angle * 7 - Math.log(dist * 0.06 + 1) * 5.2 + spin);
             const rim = Math.exp(-Math.pow((dist - apertureR) / 9, 2)) * 0.55;
-            const falloff = Math.max(0, 1 - radial * 0.95);
-            const lum = Math.max(0, Math.min(1, (groove * 0.38 + 0.42) * falloff + rim));
+            const falloff = 1 - radial * 0.44;
+            const lum = Math.max(0.12, Math.min(1, (groove * 0.38 + 0.42) * falloff + rim));
             line += ASCII_RAMP[Math.min(ASCII_RAMP.length - 1, Math.floor(lum * (ASCII_RAMP.length - 1)))];
           }
         }
@@ -115,8 +116,8 @@ export function Ocean({ boats, active, compact, onPick, children }: Props) {
 
       // Left-to-right obsidian veil for title legibility
       const veil = ctx.createLinearGradient(0, 0, w * 0.65, 0);
-      veil.addColorStop(0, "rgba(7, 8, 11, 0.86)");
-      veil.addColorStop(0.55, "rgba(7, 8, 11, 0.45)");
+      veil.addColorStop(0, "rgba(7, 8, 11, 0.62)");
+      veil.addColorStop(0.55, "rgba(7, 8, 11, 0.38)");
       veil.addColorStop(1, "rgba(7, 8, 11, 0)");
       ctx.fillStyle = veil;
       ctx.fillRect(0, 0, w, h);
@@ -130,6 +131,14 @@ export function Ocean({ boats, active, compact, onPick, children }: Props) {
     };
 
     resize();
+    let mounted = true;
+    // The first static frame may use a fallback width until the webfont loads.
+    void document.fonts
+      .load(ASCII_FONT)
+      .then(() => {
+        if (mounted && reduced.matches) draw(0);
+      })
+      .catch(() => {});
     const ro = new ResizeObserver(() => {
       resize();
       if (reduced.matches) draw(0);
@@ -151,6 +160,7 @@ export function Ocean({ boats, active, compact, onPick, children }: Props) {
     else raf = requestAnimationFrame(loop);
 
     return () => {
+      mounted = false;
       cancelAnimationFrame(raf);
       ro.disconnect();
     };

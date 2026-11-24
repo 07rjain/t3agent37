@@ -13,6 +13,7 @@ The t3agent37 collector runs at `https://t3agent37-telemetry.bothra434.workers.d
 
 ## Dashboard
 
+- The **Desktop opt-ins** tile counts first-launch events from opted-in installations. Provisioning, pairing, sleep, wake, and update events appear when those actions happen.
 - Create a PostHog funnel using `first_launch`, `first_machine_provisioned`, and `first_t3_paired`. Label it **Opted-in desktop installs**.
 - Plot `machine_sleep` and `machine_wake` by `outcome` and filter by `app_version`. Plot `update_failed` by `stage` alongside `update_succeeded`. Some failed installs never relaunch, so these update counts do not give a complete install success rate.
 

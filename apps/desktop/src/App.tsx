@@ -80,13 +80,18 @@ export default function App() {
     body = <Ocean boats={[]} />;
   } else if (state.telemetry === "undecided" && !skippedTelemetry) {
     body = (
-      <TelemetryChoice
-        onChoose={async (enabled) => {
-          await call("set_telemetry_consent", { enabled }).catch((e) => show(errorText(e)));
-          if (!enabled) setSkippedTelemetry(true);
-        }}
-        onPrivacy={() => call("open_telemetry_privacy", undefined).catch((e) => show(errorText(e)))}
-      />
+      <>
+        <Ocean boats={[]}>
+          <Brand />
+        </Ocean>
+        <TelemetryChoice
+          onChoose={async (enabled) => {
+            await call("set_telemetry_consent", { enabled }).catch((e) => show(errorText(e)));
+            if (!enabled) setSkippedTelemetry(true);
+          }}
+          onPrivacy={() => call("open_telemetry_privacy", undefined).catch((e) => show(errorText(e)))}
+        />
+      </>
     );
   } else if (state.setup !== "ready") {
     body = <Setup state={state} onError={show} />;
