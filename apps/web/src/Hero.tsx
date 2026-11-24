@@ -8,6 +8,7 @@ const FRAMES = BOND_RLE.map(decodeBondFrame);
 // Frames around Bond's turn & fire where a subtle crimson reticle tint pulses.
 const FIRE_START = 34;
 const FIRE_END = 46;
+const EDGE_BLEED_COLS = 12;
 
 const DOSSIER = [
   { code: "01", name: "mi6-dev", state: "working", meta: "2 vCPU · 4 GB" },
@@ -49,20 +50,19 @@ export function Hero({ nav, children }: { nav: ReactNode; children: ReactNode })
       ctx.fillStyle = "#07080b";
       ctx.fillRect(0, 0, width, height);
 
-      // Fit the 116x42 ASCII matrix cleanly across the hero (biased slightly right on wide screens
-      // so the rifled gun barrel & walking silhouette frame the headline dramatically).
-      const charAspect = 0.6;
-      const cellByH = height / BOND_H;
-      const cellByW = width / (BOND_W * charAspect);
-      const cellH = Math.max(cellByH, cellByW * 0.92);
-      const cellW = cellH * charAspect;
+      const family = '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace';
+      ctx.font = `500 10px ${family}`;
+      const charAspect = ctx.measureText("M").width / 10;
+      const cellH = Math.max(height / BOND_H, width / ((BOND_W - 2 * EDGE_BLEED_COLS) * charAspect));
+      ctx.font = `500 ${cellH}px ${family}`;
+      const cellW = ctx.measureText("M").width;
       const totalW = BOND_W * cellW;
       const totalH = BOND_H * cellH;
-      const offsetX = width >= 900 ? width - totalW * 0.88 : (width - totalW) / 2;
+      // Trim the frame's blank margins and bias the subject to the right on wide screens.
+      const bleed = EDGE_BLEED_COLS * cellW;
+      const offsetX = -bleed - Math.max(0, totalW - 2 * bleed - width) * (width >= 900 ? 0.35 : 0.5);
       const offsetY = (height - totalH) / 2;
 
-      const fontSize = Math.max(8, cellH * 1.02);
-      ctx.font = `500 ${fontSize.toFixed(1)}px "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace`;
       ctx.textBaseline = "top";
 
       const frame = FRAMES[frameIdx % FRAMES.length];

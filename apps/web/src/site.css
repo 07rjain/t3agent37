@@ -203,7 +203,6 @@ h1 {
   text-wrap: pretty;
 }
 
-/* the button, and beside it the systems it installs on */
 .hero-cta {
   display: flex;
   flex-wrap: wrap;
@@ -214,15 +213,15 @@ h1 {
 .hero-cta .install {
   margin-top: 0;
 }
-.hero-os {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  color: rgb(255 255 255 / 0.7);
+.hero-copy .hero-privacy {
+  margin-top: 16px;
+  font-size: 13px;
+  color: var(--muted);
 }
-.hero-os svg {
-  width: auto;
-  height: 14px;
+.hero-privacy a {
+  color: var(--fg);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 /* ── the install button ────────────────────────────── */
@@ -1065,6 +1064,13 @@ a.needs-logo:hover {
   --install-hover: #ef4444;
   --install-fg: #ffffff;
   --install-shadow: 4px 4px 0 #450a0a;
+}
+.hero-bond .install.is-secondary {
+  --install-bg: var(--panel);
+  --install-hover: var(--blue-100);
+  --install-fg: var(--fg);
+  --install-shadow: none;
+  border: 1px solid var(--frame);
 }
 
 .bond-dossier {

@@ -4,7 +4,7 @@ import { Hero } from "./Hero";
 import { Relay } from "./Relay";
 import { InstallButton } from "./InstallButton";
 import { Agent37Mark, AppleMark, GitHubMark, LinuxMark, T3CodeMark, WindowsMark } from "./logos";
-import { AGENT37, CREATOR, REPO, T3CODE, UPSTREAM } from "./links";
+import { AGENT37, CREATOR, RELEASES, REPO, T3CODE, UPSTREAM } from "./links";
 
 function OsMarks({ className }: { className: string }) {
   return (
@@ -64,9 +64,15 @@ export function Site() {
           CRIU-checkpoints them to sleep when idle.
         </p>
         <div className="hero-cta">
-          <InstallButton />
-          <OsMarks className="hero-os" />
+          <a className="install" href={RELEASES}>
+            <AppleMark className="install-icon" aria-hidden />
+            Download for macOS
+          </a>
+          <InstallButton secondary />
         </div>
+        <p className="hero-privacy">
+          Desktop telemetry is <a href={`${REPO}/blob/main/PRIVACY.md`}>optional and off by default</a>.
+        </p>
       </Hero>
 
       <Together />
