@@ -4,7 +4,7 @@ import { Hero } from "./Hero";
 import { Relay } from "./Relay";
 import { InstallButton } from "./InstallButton";
 import { Agent37Mark, AppleMark, GitHubMark, LinuxMark, T3CodeMark, WindowsMark } from "./logos";
-import { AGENT37, CREATOR, RELEASES, REPO, T3CODE, UPSTREAM } from "./links";
+import { AGENT37_AFFILIATE, CREATOR, RELEASES, REPO, T3CODE, UPSTREAM } from "./links";
 
 function OsMarks({ className }: { className: string }) {
   return (
@@ -90,12 +90,17 @@ export function Site() {
             </a>
             <span>Desktop app or Linux server</span>
           </li>
-          <li data-ai-content={`An [Agent37](${AGENT37}) API key. Pay-as-you-go wallet, no subscription ($4.76/mo entry container, $0.09/GB/mo asleep disk).`}>
-            <a href={AGENT37} className="needs-logo" aria-label="Agent37">
+          <li data-ai-content={`An [Agent37](${AGENT37_AFFILIATE}) API key (affiliate link). Pay-as-you-go wallet, no subscription ($4.76/mo entry container, $0.09/GB/mo asleep disk).`}>
+            <a href={AGENT37_AFFILIATE} rel="sponsored" className="needs-logo" aria-label="Agent37" aria-describedby="agent37-affiliate">
               <Agent37Mark className="needs-t3" aria-hidden />
               Agent37
             </a>
-            <span>Pay-as-you-go wallet · no subscription</span>
+            <span>
+              Pay-as-you-go wallet · no subscription
+              <small id="agent37-affiliate" className="needs-disclosure">
+                Rishabh may earn a commission if you sign up through this link.
+              </small>
+            </span>
           </li>
           <li>
             <OsMarks className="needs-logo needs-os" />
@@ -113,7 +118,7 @@ export function Site() {
               <T3CodeMark className="footer-t3" aria-hidden />
               Code
             </a>
-            <a href={AGENT37} aria-label="Agent37">
+            <a href={AGENT37_AFFILIATE} rel="sponsored" aria-label="Agent37" aria-describedby="agent37-affiliate">
               <Agent37Mark className="footer-t3" aria-hidden />
               Agent37
             </a>
@@ -127,7 +132,7 @@ export function Site() {
           <p>
             Built by <a href={CREATOR}>Rishabh Bothra</a> · Forked from <a href={UPSTREAM}>t3boat</a> by Pau Kraft
           </p>
-          <p>Not affiliated with or endorsed by T3 Code or Agent37.</p>
+          <p>An independent project.</p>
         </div>
       </footer>
       <Analytics />

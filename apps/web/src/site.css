@@ -802,6 +802,12 @@ h2 {
   color: var(--muted);
 }
 
+.needs-disclosure {
+  display: block;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
 /* every logo on the same 28px line */
 .needs-logo {
   display: inline-flex;
