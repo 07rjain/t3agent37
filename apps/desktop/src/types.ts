@@ -147,6 +147,8 @@ export interface UiState {
   mcp: Record<McpClient, boolean | null>;
   /** Latest GitHub Release check / install status */
   update?: UpdateInfo;
+  /** Present when the native desktop build has a telemetry collector. */
+  telemetry?: "undecided" | "disabled" | "enabled";
 }
 
 export interface MachineDetails {
@@ -191,6 +193,8 @@ export interface Commands {
   get_machine_details: [{ id: string }, MachineDetails];
   add_mcp: [{ client: McpClient }, void];
   update_settings: [{ settings: Settings }, void];
+  set_telemetry_consent: [{ enabled: boolean }, void];
+  open_telemetry_privacy: [undefined, void];
   setup_action: [{ action: SetupAction }, void];
   check_for_updates: [undefined, UpdateInfo];
   install_update: [undefined, void];

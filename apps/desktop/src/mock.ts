@@ -4,6 +4,7 @@
 // ?projects=0|error (T3 Code has no projects with a remote / listing them fails)
 // ?ready=1 (a new machine comes up in T3 Code with its agents signed in and acme on it, as the website shows it)
 // ?disk=full (devbox's disk is nearly full)  ?wallet=low
+import { version as desktopVersion } from "../package.json";
 import type { Backend } from "./api";
 import { timeLapse } from "./pixel/clock";
 import { computeHourly, diskMonthly, monthly } from "./machine";
@@ -22,6 +23,8 @@ import type {
 } from "./types";
 
 const params = new URLSearchParams(location.search);
+const releasesUrl = "https://github.com/07rjain/t3agent37/releases";
+const mockUpdateAssets = `${releasesUrl}/download/v${desktopVersion}`;
 
 /** Agent37's shapes: $0.80 per vCPU and $0.70 per GB of RAM a month, by the awake hour. */
 const SIZES: Size[] = [
@@ -185,24 +188,24 @@ function seed(): UiState {
       params.get("update") === "1"
         ? {
             currentVersion: "0.2.0",
-            latestVersion: "0.2.1",
+            latestVersion: desktopVersion,
             updateAvailable: true,
-            releaseUrl: "https://github.com/07rjain/t3agent37/releases/tag/v0.2.1",
-            changelog: "### Fixed\n- Faster Agent37 provisioning and automatic update checks.",
+            releaseUrl: `${releasesUrl}/tag/v${desktopVersion}`,
+            changelog: "### Added\n- Optional desktop telemetry for setup, sleep and wake, and app updates.",
             publishedAt: new Date().toISOString(),
             assetName: "t3agent37-macos-aarch64.app.tar.gz",
-            assetUrl: "https://github.com/07rjain/t3agent37/releases/download/v0.2.1/t3agent37-macos-aarch64.app.tar.gz",
-            checksumsUrl: "https://github.com/07rjain/t3agent37/releases/download/v0.2.1/SHA256SUMS.txt",
+            assetUrl: `${mockUpdateAssets}/t3agent37-macos-aarch64.app.tar.gz`,
+            checksumsUrl: `${mockUpdateAssets}/SHA256SUMS.txt`,
             canSelfUpdate: true,
             status: "available",
             error: null,
             checkedAt: Math.floor(Date.now() / 1000),
           }
         : {
-            currentVersion: "0.2.0",
-            latestVersion: "0.2.0",
+            currentVersion: desktopVersion,
+            latestVersion: desktopVersion,
             updateAvailable: false,
-            releaseUrl: "https://github.com/07rjain/t3agent37/releases",
+            releaseUrl: releasesUrl,
             changelog: null,
             publishedAt: null,
             assetName: null,
@@ -274,6 +277,15 @@ function create(): MockBackend {
 
   const handlers: { [C in CommandName]: (a: CommandArgs<C>) => Promise<unknown> } = {
     get_state: async () => structuredClone(state),
+
+    async set_telemetry_consent({ enabled }) {
+      state.telemetry = enabled ? "enabled" : "disabled";
+      emit();
+    },
+
+    async open_telemetry_privacy() {
+      window.open("https://github.com/07rjain/t3agent37/blob/main/PRIVACY.md", "_blank", "noopener,noreferrer");
+    },
 
     async save_api_key({ apiKey }) {
       await wait(900);
@@ -506,13 +518,13 @@ function create(): MockBackend {
     },
 
     async check_for_updates() {
-      const current = state.update?.currentVersion ?? "0.2.0";
+      const current = state.update?.currentVersion ?? desktopVersion;
       state.update = {
         ...(state.update ?? {
           currentVersion: current,
           latestVersion: current,
           updateAvailable: false,
-          releaseUrl: "https://github.com/07rjain/t3agent37/releases",
+          releaseUrl: releasesUrl,
           changelog: null,
           publishedAt: null,
           assetName: null,

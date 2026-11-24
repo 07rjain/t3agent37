@@ -6,10 +6,11 @@ use crate::machine::provision::{SizeInfo, SIZES};
 use crate::machine::Event;
 use crate::mcp;
 use crate::store::Settings;
+use crate::telemetry::{Consent, Telemetry, UpdateStage};
 use crate::updater::{self, InstallOutcome, UpdateInfo, UpdateStatus};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -38,6 +39,7 @@ struct Ui {
     windowed: AtomicBool,
     init_lock: tokio::sync::Mutex<()>,
     update_lock: tokio::sync::Mutex<()>,
+    telemetry: OnceLock<Arc<Telemetry>>,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -90,6 +92,8 @@ struct UiState {
     sizes: &'static [SizeInfo],
     mcp: McpStatus,
     update: UpdateInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    telemetry: Option<Consent>,
 }
 
 impl Ui {
@@ -112,6 +116,7 @@ impl Ui {
             sizes: SIZES,
             mcp: self.mcp.lock().unwrap().clone(),
             update: self.update.lock().unwrap().clone(),
+            telemetry: self.telemetry.get().map(|telemetry| telemetry.consent()),
         }
     }
 }
@@ -171,7 +176,7 @@ async fn init(handle: AppHandle) {
     }
     if let (Setup::Ready, Some(agent37), Some(t3)) = (setup, a37, t3) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        match App::new(agent37, t3, data_dir, tx) {
+        match App::with_telemetry(agent37, t3, data_dir, tx, ui.telemetry.get().cloned()) {
             Ok(app) => {
                 *ui.app.lock().unwrap() = Some(app.clone());
                 if let Err(e) = apply_autostart(&handle, app.settings().start_at_login) {
@@ -242,6 +247,7 @@ async fn background(handle: AppHandle, app: Arc<App>) {
 async fn perform_update_check(handle: &AppHandle, interactive: bool) -> Result<UpdateInfo, String> {
     let ui = handle.state::<Ui>();
     let _guard = ui.update_lock.lock().await;
+    let attempt = ui.telemetry.get().and_then(|telemetry| telemetry.attempt());
     {
         let mut u = ui.update.lock().unwrap();
         u.status = UpdateStatus::Checking;
@@ -274,6 +280,9 @@ async fn perform_update_check(handle: &AppHandle, interactive: bool) -> Result<U
             Ok(info)
         }
         Err(e) => {
+            if let Some(attempt) = attempt {
+                attempt.update_failed(UpdateStage::Check);
+            }
             let msg = format!("{e:#}");
             tracing::warn!("update check failed: {msg}");
             if interactive {
@@ -298,6 +307,7 @@ async fn perform_update_check(handle: &AppHandle, interactive: bool) -> Result<U
 async fn perform_install_update(handle: &AppHandle) -> Res {
     let ui = handle.state::<Ui>();
     let _guard = ui.update_lock.lock().await;
+    let telemetry = ui.telemetry.get().and_then(|telemetry| Some((telemetry, telemetry.attempt()?)));
     let mut info = ui.update.lock().unwrap().clone();
     if !info.update_available || info.asset_url.is_none() {
         {
@@ -313,6 +323,9 @@ async fn perform_install_update(handle: &AppHandle) -> Res {
                 info = fresh;
             }
             Err(e) => {
+                if let Some((_, attempt)) = telemetry {
+                    attempt.update_failed(UpdateStage::Check);
+                }
                 let msg = format!("{e:#}");
                 let mut u = ui.update.lock().unwrap();
                 u.status = UpdateStatus::Error;
@@ -326,15 +339,25 @@ async fn perform_install_update(handle: &AppHandle) -> Res {
     if !info.update_available {
         return Ok(());
     }
-    let stage_handle = handle.clone();
-    let res = updater::download_and_install(&info, move |stage| {
+    let stage = Mutex::new(UpdateStage::OpenReleasePage);
+    let res = updater::download_and_install_with_stages(&info, |step| {
+        *stage.lock().unwrap() = step;
+        let status = match step {
+            UpdateStage::Download | UpdateStage::Verify => UpdateStatus::Downloading,
+            UpdateStage::Install => {
+                if let Some((telemetry, attempt)) = &telemetry {
+                    telemetry.pending_update(attempt, info.latest_version.as_deref());
+                }
+                UpdateStatus::Installing
+            }
+            _ => return,
+        };
         {
-            let ui = stage_handle.state::<Ui>();
             let mut u = ui.update.lock().unwrap();
-            u.status = stage;
+            u.status = status;
             u.error = None;
         }
-        emit_state(&stage_handle);
+        emit_state(handle);
     })
     .await;
 
@@ -366,6 +389,13 @@ async fn perform_install_update(handle: &AppHandle) -> Res {
             Ok(())
         }
         Err(e) => {
+            if let Some((telemetry, attempt)) = telemetry {
+                let stage = stage.into_inner().unwrap();
+                if matches!(stage, UpdateStage::Install) {
+                    telemetry.pending_update(&attempt, None);
+                }
+                attempt.update_failed(stage);
+            }
             let msg = format!("{e:#}");
             tracing::error!("installing update failed: {msg}");
             {
@@ -557,6 +587,19 @@ fn get_state(ui: State<'_, Ui>) -> UiState {
 }
 
 #[tauri::command]
+async fn set_telemetry_consent(handle: AppHandle, ui: State<'_, Ui>, enabled: bool) -> Res {
+    let telemetry = ui.telemetry.get().ok_or_else(|| "Desktop telemetry is unavailable".to_owned())?;
+    telemetry.set_consent(enabled).await.map_err(err)?;
+    emit_state(&handle);
+    Ok(())
+}
+
+#[tauri::command]
+fn open_telemetry_privacy() -> Res {
+    app::open_url("https://github.com/07rjain/t3agent37/blob/main/PRIVACY.md").map_err(err)
+}
+
+#[tauri::command]
 async fn save_api_key(handle: AppHandle, api_key: String) -> Res {
     let client = Agent37::from_key_with_env(api_key.clone()).map_err(err)?;
     client.billing().await.map_err(|e| format!("Agent37 rejected that API key: {e:#}"))?;
@@ -743,6 +786,8 @@ pub fn run() {
         .manage(Ui::default())
         .invoke_handler(tauri::generate_handler![
             get_state,
+            set_telemetry_consent,
+            open_telemetry_privacy,
             save_api_key,
             create_machine,
             local_projects,
@@ -770,6 +815,12 @@ pub fn run() {
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            if let Ok(dir) = app.path().app_data_dir()
+                && let Some(telemetry) = Telemetry::configured(&dir)
+            {
+                let _ = app.state::<Ui>().telemetry.set(Arc::new(telemetry));
+            }
 
             let open = MenuItem::with_id(app, "open", "Open t3agent37", true, None::<&str>)?;
             let update_item = MenuItem::with_id(
@@ -856,7 +907,13 @@ pub fn run() {
             }
             #[cfg(target_os = "linux")]
             follow_tray_host(app.handle());
-            tauri::async_runtime::spawn(init(app.handle().clone()));
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(telemetry) = handle.state::<Ui>().telemetry.get() {
+                    telemetry.start();
+                }
+                init(handle).await;
+            });
             tauri::async_runtime::spawn(background_updates(app.handle().clone()));
             Ok(())
         })

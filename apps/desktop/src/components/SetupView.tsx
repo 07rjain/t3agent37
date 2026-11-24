@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useState, type FormEvent, type ReactNode } from "react";
 import type { Setup, SetupAction } from "../types";
 import { Icon } from "./Icons";
 import { Dots } from "./common";
@@ -21,12 +21,14 @@ export function SetupView({
   busy,
   onAction,
   onSaveKey,
+  privacy,
 }: {
   setup: Setup;
   busy: boolean;
   onAction: (a: SetupAction) => void;
   /** never rejects; errors are shown by the caller */
   onSaveKey: (apiKey: string) => Promise<void>;
+  privacy?: ReactNode;
 }) {
   if (setup === "starting" || setup === "ready") {
     return (
@@ -73,6 +75,7 @@ export function SetupView({
             );
           })}
         </ol>
+        {privacy}
       </div>
       <div className="view-foot">
         <button className="btn btn-link" disabled={busy} onClick={() => onAction("recheck")}>

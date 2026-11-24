@@ -157,6 +157,11 @@ async fn oauth_token(State(m): M, Form(form): Form<HashMap<String, String>>) -> 
         body["permissions"] = p.clone();
     }
     tracing::info!("T3 Code paired with {}", m.id());
+    if let Some(telemetry) = &m.shared.telemetry
+        && let Some(attempt) = telemetry.attempt()
+    {
+        telemetry.milestone(crate::telemetry::Milestone::FirstPair, &attempt);
+    }
     Json(body).into_response()
 }
 

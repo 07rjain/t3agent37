@@ -2,6 +2,7 @@
 
 use crate::app::open_url;
 use crate::proxy::auth::random_token;
+use crate::telemetry::UpdateStage;
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::header::{ACCEPT, USER_AGENT};
 use reqwest::StatusCode;
@@ -283,6 +284,18 @@ fn verify_sha256(bytes: &[u8], checksums_text: &str, expected_filename: &str) ->
 
 /// Downloads, verifies, and installs the release described by `info`.
 pub async fn download_and_install(info: &UpdateInfo, on_stage: impl Fn(UpdateStatus)) -> Result<InstallOutcome> {
+    download_and_install_with_stages(info, |stage| match stage {
+        UpdateStage::Download => on_stage(UpdateStatus::Downloading),
+        UpdateStage::Install => on_stage(UpdateStatus::Installing),
+        _ => {}
+    })
+    .await
+}
+
+pub(crate) async fn download_and_install_with_stages(
+    info: &UpdateInfo,
+    on_stage: impl Fn(UpdateStage),
+) -> Result<InstallOutcome> {
     let release_url = info.release_url.clone().unwrap_or_else(releases_page_url);
     if !cfg!(target_os = "macos") {
         open_url(&release_url)?;
@@ -293,7 +306,7 @@ pub async fn download_and_install(info: &UpdateInfo, on_stage: impl Fn(UpdateSta
         return Ok(InstallOutcome::OpenedReleasePage(release_url));
     };
 
-    on_stage(UpdateStatus::Downloading);
+    on_stage(UpdateStage::Download);
     let client = http_client()?;
     let bytes = download_bytes(&client, asset_url)
         .await
@@ -303,11 +316,12 @@ pub async fn download_and_install(info: &UpdateInfo, on_stage: impl Fn(UpdateSta
         let sum_bytes = download_bytes(&client, checksums_url)
             .await
             .context("downloading SHA256SUMS.txt")?;
+        on_stage(UpdateStage::Verify);
         let sum_text = String::from_utf8(sum_bytes).context("SHA256SUMS.txt is not valid UTF-8")?;
         verify_sha256(&bytes, &sum_text, asset_name)?;
     }
 
-    on_stage(UpdateStatus::Installing);
+    on_stage(UpdateStage::Install);
     install_macos_archive(&bytes)
 }
 

@@ -2,6 +2,7 @@
 
 <p>
   <a href="https://t3agent37.subdomain.wtf/">Website &amp; Interactive Demo</a> ·
+  <a href="https://github.com/07rjain/t3agent37/releases/latest">Download for macOS</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="apps/desktop/docs/architecture.md">How it works</a>
 </p>
@@ -20,6 +21,8 @@ Create isolated cloud containers or VMs on your Agent37 wallet, pair them into T
 - **Local MCP server** (`http://127.0.0.1:47730/mcp`): lets local Claude Code or Codex agents create, wake, sleep, resize, and manage Agent37 machines.
 
 ## Quick start
+
+On macOS, download the `aarch64` DMG for Apple Silicon or the `x86_64` DMG for Intel from [GitHub Releases](https://github.com/07rjain/t3agent37/releases/latest). Open the DMG, drag t3agent37 to Applications, and follow the menu-bar app's setup prompts. Existing installations can check for updates in **Settings → Updates**. See the [changelog](CHANGELOG.md) for release notes.
 
 ### 1. Build & run the headless daemon (Linux VPS / CLI — no GTK needed)
 
@@ -50,17 +53,25 @@ bun install
 bun run build:desktop
 ```
 
+## Desktop telemetry
+
+Telemetry is off until you choose **Share telemetry**. You can change your choice in **Settings → Privacy**. The native desktop app can share setup milestones, sleep and wake outcomes, and app update results. Turning telemetry off clears queued events and removes the local installation ID. See the [privacy notice](PRIVACY.md) for the data fields and retention period, and the [collector guide](telemetry/README.md) for deployment and verification.
+
 ## Development & Tests
 
 ```sh
 # Rust unit + end-to-end mock Agent37 integration tests (no GTK required)
-cd apps/desktop/src-tauri && cargo test --no-default-features
+cargo test --locked --no-default-features --manifest-path apps/desktop/src-tauri/Cargo.toml
 
 # Frontend typecheck & production bundle
 bun --filter @t3boat/desktop build
+
+# Telemetry collector contract and release version checks
+node --test telemetry/worker.test.mjs
+bun run release:verify
 ```
 
-Architecture details: [apps/desktop/docs/architecture.md](apps/desktop/docs/architecture.md).
+See the [architecture overview](apps/desktop/docs/architecture.md) and [agent guide](AGENTS.md).
 
 ## License
 

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { version as desktopVersion } from "../package.json";
 import { call, errorText, inWebDaemon, useUiState, type Notice } from "./api";
 import type { LocalProject, McpClient, MachineView, SetupAction, UiState } from "./types";
 import { machineKey, type Action } from "./machine";
@@ -8,6 +9,7 @@ import { NewMachine, type NewMachineSpec } from "./components/NewMachine";
 import { SettingsView } from "./components/SettingsView";
 import { MachineDetails } from "./components/MachineDetails";
 import { SetupView } from "./components/SetupView";
+import { TelemetryChoice, TelemetrySetting } from "./components/TelemetryChoice";
 import { Costs } from "./components/Costs";
 import { Icon } from "./components/Icons";
 import { WebConsole } from "./components/WebConsole";
@@ -39,6 +41,7 @@ export default function App() {
   );
   const { state, loadError, retry } = useUiState(onNotice);
   const prevNames = useRef<Map<string, string> | null>(null);
+  const [skippedTelemetry, setSkippedTelemetry] = useState(false);
 
   // Surface live machine creation & deletion events in Web UI even when triggered via MCP/CLI.
   useEffect(() => {
@@ -75,6 +78,16 @@ export default function App() {
     );
   } else if (!state) {
     body = <Ocean boats={[]} />;
+  } else if (state.telemetry === "undecided" && !skippedTelemetry) {
+    body = (
+      <TelemetryChoice
+        onChoose={async (enabled) => {
+          await call("set_telemetry_consent", { enabled }).catch((e) => show(errorText(e)));
+          if (!enabled) setSkippedTelemetry(true);
+        }}
+        onPrivacy={() => call("open_telemetry_privacy", undefined).catch((e) => show(errorText(e)))}
+      />
+    );
   } else if (state.setup !== "ready") {
     body = <Setup state={state} onError={show} />;
   } else {
@@ -122,7 +135,19 @@ function Setup({ state, onError }: { state: UiState; onError: (t: string) => voi
       <Ocean boats={[{ key: "setup", name: "t3agent37", state: "creating" }]}>
         <Brand />
       </Ocean>
-      <SetupView setup={state.setup} busy={state.setupBusy} onAction={act} onSaveKey={saveKey} />
+      <SetupView
+        setup={state.setup}
+        busy={state.setupBusy}
+        onAction={act}
+        onSaveKey={saveKey}
+        privacy={state.telemetry ? (
+          <TelemetrySetting
+            enabled={state.telemetry === "enabled"}
+            onChoose={(enabled) => call("set_telemetry_consent", { enabled }).catch((e) => onError(errorText(e)))}
+            onPrivacy={() => call("open_telemetry_privacy", undefined).catch((e) => onError(errorText(e)))}
+          />
+        ) : undefined}
+      />
     </>
   );
 }
@@ -268,7 +293,7 @@ function Ready({ state, toast }: { state: UiState; toast: (t: string, tone?: "er
             title={
               update?.updateAvailable
                 ? `Update app to v${update.latestVersion ?? "latest"}`
-                : `Check for updates (v${update?.currentVersion ?? "0.2.0"})`
+                : `Check for updates (v${update?.currentVersion ?? desktopVersion})`
             }
             aria-label={update?.updateAvailable ? "Update app" : "Check for updates"}
           >
@@ -340,6 +365,8 @@ function Ready({ state, toast }: { state: UiState; toast: (t: string, tone?: "er
         <SettingsView
           state={state}
           onSave={(settings) => call("update_settings", { settings }).catch((e) => toast(errorText(e)))}
+          onTelemetry={(enabled) => call("set_telemetry_consent", { enabled }).catch((e) => toast(errorText(e)))}
+          onTelemetryPrivacy={() => call("open_telemetry_privacy", undefined).catch((e) => toast(errorText(e)))}
           onAddMcp={addMcp}
           onCheckUpdates={checkUpdates}
           onInstallUpdate={installUpdate}

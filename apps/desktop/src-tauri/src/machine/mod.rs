@@ -19,6 +19,7 @@ use crate::proxy::threads;
 use crate::proxy::upstream;
 use crate::store::{Machine, Settings};
 use crate::t3desktop::T3Desktop;
+use crate::telemetry::{Outcome, Telemetry};
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
@@ -162,6 +163,7 @@ pub struct Shared {
     pub settings: RwLock<Settings>,
     pub events: mpsc::UnboundedSender<Event>,
     pub http: reqwest::Client,
+    pub telemetry: Option<Arc<Telemetry>>,
     /// Cancels a prior in-flight browser OAuth sign-in so a retry immediately frees the local port.
     pub sign_in_cancel: Mutex<Option<(tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Receiver<()>)>>,
 }
@@ -431,7 +433,11 @@ impl MachineRuntime {
                 return Ok(());
             }
         }
+        let attempt = self.shared.telemetry.as_ref().and_then(|telemetry| telemetry.attempt());
         let result = self.wake_locked().await;
+        if let Some(attempt) = attempt {
+            attempt.wake(if result.is_ok() { Outcome::Succeeded } else { Outcome::Failed });
+        }
         let was_failing = self.wake_failure.lock().unwrap().is_some();
         let failed = match &result {
             Ok(()) => {
@@ -691,7 +697,16 @@ impl MachineRuntime {
         }
         // Explicit user "Sleep now" overrides any background retry cooldown.
         *self.sleep_failure.lock().unwrap() = None;
-        let s = self.watchdog_post("/drain", json!({})).await?;
+        let attempt = self.shared.telemetry.as_ref().and_then(|telemetry| telemetry.attempt());
+        let s = match self.watchdog_post("/drain", json!({})).await {
+            Ok(status) => status,
+            Err(error) => {
+                if let Some(attempt) = attempt {
+                    attempt.sleep(Outcome::WatchdogFailed);
+                }
+                return Err(error);
+            }
+        };
         *self.last_heartbeat.lock().unwrap() = None;
         self.on_watchdog_status(s).await;
         Ok(())
@@ -861,10 +876,14 @@ impl MachineRuntime {
         if self.power() != Power::Running || self.is_stopping() {
             return;
         }
+        let attempt = self.shared.telemetry.as_ref().and_then(|telemetry| telemetry.attempt());
         if let Some(ref m) = manifest {
             if self.captured_sequence() != Some(m.sequence) {
                 self.drop_capture();
                 if let Err(e) = self.capture(m).await {
+                    if let Some(attempt) = attempt {
+                        attempt.sleep(Outcome::CaptureFailed);
+                    }
                     tracing::warn!("capture failed for {}: {e:#}", self.id());
                     return;
                 }
@@ -901,6 +920,9 @@ impl MachineRuntime {
                 return;
             }
             Err(e) => {
+                if let Some(attempt) = attempt {
+                    attempt.sleep(Outcome::WatchdogFailed);
+                }
                 tracing::warn!("sleep-ack failed for {}: {e:#}", self.id());
                 return;
             }
@@ -912,7 +934,11 @@ impl MachineRuntime {
         self.mark_stopping();
         let id = self.sandbox_id();
         tracing::info!("putting Agent37 instance {} to sleep (checkpoint)", self.id());
-        match self.shared.agent37.sleep(&id).await {
+        let result = self.shared.agent37.sleep(&id).await;
+        if let Some(attempt) = attempt {
+            attempt.sleep(if result.is_ok() { Outcome::Succeeded } else { Outcome::Failed });
+        }
+        match result {
             Ok(()) => {
                 *self.sleep_failure.lock().unwrap() = None;
                 *self.stopped_at.lock().unwrap() = Some(chrono::Utc::now());

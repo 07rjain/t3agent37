@@ -4,6 +4,12 @@ All notable changes to **t3agent37** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-24
+
+### Added
+- **Opt-in desktop telemetry** for first machine setup and T3 Code pairing, sleep and wake outcomes, and app update results. Choose during setup or under **Settings → Privacy**. Telemetry starts off for both new and existing installs.
+- **Telemetry collector and privacy notice.** The Cloudflare Worker validates and rate-limits events before forwarding them to a dedicated PostHog project. Events use a random installation ID and a one-year retention period. See [what the app shares](https://github.com/07rjain/t3agent37/blob/main/PRIVACY.md).
+
 ## [0.2.0] - 2026-11-22
 
 ### Added

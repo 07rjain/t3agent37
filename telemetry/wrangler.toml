@@ -1,0 +1,15 @@
+name = "t3agent37-telemetry"
+main = "worker.mjs"
+compatibility_date = "2026-11-23"
+preview_urls = false
+
+[vars]
+POSTHOG_REGION = "us"
+
+[observability]
+enabled = false
+
+[[ratelimits]]
+name = "INGEST_RATE_LIMIT"
+namespace_id = "3701"
+simple = { limit = 60, period = 60 }

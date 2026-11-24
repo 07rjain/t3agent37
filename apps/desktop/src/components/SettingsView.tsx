@@ -4,6 +4,7 @@ import { AgentName, AgentNames } from "./AgentLogos";
 import { Icon } from "./Icons";
 import { Dots } from "./common";
 import { SubHeader } from "./SubHeader";
+import { TelemetrySetting } from "./TelemetryChoice";
 
 const CLIENTS: { id: McpClient; name: string }[] = [
   { id: "claudeCode", name: "Claude Code" },
@@ -26,6 +27,8 @@ interface Props {
   onSave: (s: Settings) => void;
   /** never rejects; errors are shown by the caller */
   onAddMcp: (client: McpClient) => Promise<void>;
+  onTelemetry?: (enabled: boolean) => Promise<void>;
+  onTelemetryPrivacy?: () => void;
   onCheckUpdates?: () => void;
   onInstallUpdate?: () => void;
   onOpenReleaseNotes?: () => void;
@@ -38,6 +41,8 @@ export function SettingsView({
   state,
   onSave,
   onAddMcp,
+  onTelemetry,
+  onTelemetryPrivacy,
   onCheckUpdates,
   onInstallUpdate,
   onOpenReleaseNotes,
@@ -93,6 +98,13 @@ export function SettingsView({
             onChange={(e) => change({ startAtLogin: e.target.checked })}
           />
         </label>
+        {state.telemetry && onTelemetry && onTelemetryPrivacy ? (
+          <TelemetrySetting
+            enabled={state.telemetry === "enabled"}
+            onChoose={onTelemetry}
+            onPrivacy={onTelemetryPrivacy}
+          />
+        ) : null}
         <div className="setting">
           <span className="caption">laptop closed</span>
           <span className="setting-name">Sleep every machine after</span>

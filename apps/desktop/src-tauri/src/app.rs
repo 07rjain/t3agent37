@@ -6,6 +6,7 @@ use crate::machine::{provision, DiskUsage, Event, MachineRuntime, Power, Shared,
 use crate::proxy;
 use crate::store::{Doomed, Settings, Spend, State, Store};
 use crate::t3desktop::T3Desktop;
+use crate::telemetry::{Milestone, Telemetry};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -176,6 +177,16 @@ impl App {
         data_dir: PathBuf,
         events: mpsc::UnboundedSender<Event>,
     ) -> Result<Arc<Self>> {
+        Self::with_telemetry(agent37, t3, data_dir, events, None)
+    }
+
+    pub(crate) fn with_telemetry(
+        agent37: Agent37,
+        t3: T3Desktop,
+        data_dir: PathBuf,
+        events: mpsc::UnboundedSender<Event>,
+        telemetry: Option<Arc<Telemetry>>,
+    ) -> Result<Arc<Self>> {
         let store = Store::new(&data_dir);
         let state = store.load().context("reading t3agent37 state")?;
         let doomed: Vec<Doomed> = state
@@ -195,6 +206,7 @@ impl App {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             sign_in_cancel: Mutex::new(None),
+            telemetry,
         });
         let app = Arc::new(Self {
             shared,
@@ -441,6 +453,7 @@ impl App {
         let port = self.reserve(name, shape.id, instance_type, region, resources.disk)?;
         self.shared.changed();
         let settings = self.settings();
+        let telemetry = self.shared.telemetry.as_ref().and_then(|telemetry| Some((telemetry, telemetry.attempt()?)));
         let template = if settings.template.trim().is_empty() {
             agent37::DEFAULT_TEMPLATE.to_owned()
         } else {
@@ -491,6 +504,9 @@ impl App {
             self.shared.notify(format!("Couldn't create {name}"), format!("{e:#}"));
         }
         let machine = result?;
+        if let Some((telemetry, attempt)) = telemetry {
+            telemetry.milestone(Milestone::FirstProvision, &attempt);
+        }
         let (app, m) = (self.clone(), machine.clone());
         tokio::spawn(async move {
             for id in projects {
