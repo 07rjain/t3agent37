@@ -5,6 +5,7 @@
 // ?ready=1 (a new machine comes up in T3 Code with its agents signed in and acme on it, as the website shows it)
 // ?disk=full (devbox's disk is nearly full)  ?wallet=low
 // ?telemetry=undecided (show the desktop consent screen)
+// ?quick=1 (shorten simulated provisioning for the interactive demo)
 import { version as desktopVersion } from "../package.json";
 import type { Backend } from "./api";
 import { timeLapse } from "./pixel/clock";
@@ -24,6 +25,7 @@ import type {
 } from "./types";
 
 const params = new URLSearchParams(location.search);
+const provisionStepMs = params.get("quick") === "1" ? 750 : 1800;
 const releasesUrl = "https://github.com/07rjain/t3agent37/releases";
 const mockUpdateAssets = `${releasesUrl}/download/v${desktopVersion}`;
 
@@ -320,7 +322,7 @@ function create(): MockBackend {
       for (const step of steps) {
         state.machines = state.machines.map((m) => (m.name === name ? { ...m, detail: step } : m));
         emit();
-        await wait(1800);
+        await wait(provisionStepMs);
       }
       const id = `sb_${Math.random().toString(16).slice(2, 6)}`;
       state.machines = state.machines.map((m) =>

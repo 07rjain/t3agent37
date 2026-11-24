@@ -90,12 +90,14 @@ export function Thread({
   picker,
   onPick,
   onSend,
+  loading = "lazy",
 }: {
   machine?: string;
   stage: Stage;
   picker: Picker;
   onPick: (p: Partial<Picker>) => void;
   onSend: () => void;
+  loading?: "eager" | "lazy";
 }) {
   const [win, setWin] = useState<Window & { t3code?: Frame }>();
   /** how far the working agent is: its steps one by one, then its reply */
@@ -181,10 +183,11 @@ export function Thread({
 
   return (
     <div className="t3">
+      {loading === "eager" && !win && <p className="demo-loading" role="status">Loading T3 Code…</p>}
       <iframe
         src="t3code/index.html"
         title="T3 Code"
-        loading="lazy"
+        loading={loading}
         onLoad={(e) => setWin(e.currentTarget.contentWindow ?? undefined)}
       />
     </div>

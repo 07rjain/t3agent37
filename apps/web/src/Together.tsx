@@ -20,8 +20,6 @@ interface Spot {
   click?: boolean;
 }
 
-/** The visitor's machine: typed into the new-machine form over the name it suggests. */
-const NAME = "mi6-dev";
 /** The new-machine form's launch button. */
 const LAUNCH = ".view-foot button[type=submit]";
 
@@ -73,6 +71,7 @@ export function Together() {
   const [machine, setMachine] = useState<MachineView>();
   const [picker, setPicker] = useState(NO_PICK);
   const [stage, setStage] = useState<Stage>("unsent");
+  const [loadThread, setLoadThread] = useState(false);
   /** the spot the arrow is at, if any is found */
   const [spot, setSpot] = useState<Spot>();
   const box = useRef<HTMLDivElement>(null);
@@ -107,7 +106,8 @@ export function Together() {
   phase.current = now;
   useEffect(() => {
     const still = matchMedia("(prefers-reduced-motion: reduce)");
-    let tick = requestAnimationFrame(function draw(t) {
+    let tick = 0;
+    const draw = (t: number) => {
       tick = requestAnimationFrame(draw);
       const { look, spots } = phase.current;
       const frame = frameOf(look);
@@ -141,24 +141,24 @@ export function Together() {
       // steps back and forth along its own line
       const nudge = still.matches ? 0 : Math.round(2 + 2 * Math.sin((t / 1000) * 6));
       arrow.current!.style.transform = `translate(${nudge}px, ${nudge}px)`;
+    };
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting && !tick) tick = requestAnimationFrame(draw);
+      else if (!entry.isIntersecting) {
+        cancelAnimationFrame(tick);
+        tick = 0;
+      }
     });
-    return () => cancelAnimationFrame(tick);
+    observer.observe(box.current!);
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(tick);
+    };
   }, []);
 
-  // the form opens: the name goes in, a key at a time
+  // Start loading T3 Code while the visitor is still in the machine form.
   useEffect(() => {
-    if (spot?.at !== LAUNCH) return;
-    const input = frameOf("app")?.contentDocument?.querySelector<HTMLInputElement>("#machine-name");
-    if (!input) return;
-    // past React's own value setter, so the input event reaches its onChange
-    const set = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")!.set!;
-    let typed = 0;
-    const key = setInterval(() => {
-      set.call(input, NAME.slice(0, ++typed));
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      if (typed === NAME.length) clearInterval(key);
-    }, 90);
-    return () => clearInterval(key);
+    if (spot?.at === LAUNCH) setLoadThread(true);
   }, [spot?.at]);
 
   /** a click on the note: as if on its spot */
@@ -174,7 +174,21 @@ export function Together() {
       <div ref={box} className="stage" data-look={now.look}>
         <p className="stage-badge">Interactive demo</p>
         <div className="pane-t3">
-          <Thread machine={machine?.paired ? machine.name : undefined} stage={stage} picker={picker} onPick={pick} onSend={send} />
+          {loadThread || machine ? (
+            <Thread
+              loading="eager"
+              machine={machine?.paired ? machine.name : undefined}
+              stage={stage}
+              picker={picker}
+              onPick={pick}
+              onSend={send}
+            />
+          ) : (
+            <div className="t3 demo-wait">
+              <span className="demo-wait-title">T3 Code</span>
+              <p>Once you create a machine, you’ll pick it here.</p>
+            </div>
+          )}
         </div>
 
         {/* around the spot, when it is the visitor's to click */}
@@ -204,8 +218,9 @@ export function Together() {
         </div>
 
         <div className="pane-app">
+          {!mock && <p className="demo-loading" role="status">Loading demo…</p>}
           <iframe
-            src="demo.html?machines=0&ready=1"
+            src="demo.html?machines=0&ready=1&quick=1"
             title="t3agent37 demo"
             width={380}
             height={560}

@@ -376,6 +376,31 @@ h2 {
 .pane-app {
   grid-area: app;
 }
+.pane-app,
+.t3 {
+  position: relative;
+}
+
+.demo-loading,
+.demo-wait {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 8px;
+  padding: 24px;
+  color: var(--muted);
+  text-align: center;
+}
+.demo-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+.demo-wait-title {
+  color: var(--fg);
+  font: 600 22px/1.2 var(--font-display);
+}
 
 /* both windows in the site's frame */
 .t3,
@@ -403,6 +428,7 @@ h2 {
   position: absolute;
   top: 0;
   left: 0;
+  z-index: 2;
   pointer-events: none;
 }
 .pointer > svg {
@@ -465,6 +491,7 @@ h2 {
   position: absolute;
   top: 0;
   left: 0;
+  z-index: 1;
   pointer-events: none;
 }
 .ring[data-on] {
