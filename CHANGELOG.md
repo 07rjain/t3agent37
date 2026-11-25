@@ -4,6 +4,15 @@ All notable changes to **t3agent37** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-25
+
+### Added
+- **Cross-machine handoffs.** Opt in when launching a machine or choose **Set up handoffs** in machine details. After you approve T3 Connect in the browser, T3 Code can discover the machine by name.
+- Machine details shows T3 Connect reachability and lets you copy the handoff address when available. Wake a sleeping machine before handing off from another device.
+
+### Changed
+- The landing page loads the interactive demo in walkthrough order so the first step can appear sooner.
+
 ## [0.3.1] - 2026-11-24
 
 ### Fixed

@@ -376,6 +376,8 @@ async fn dispatch(ui: &Arc<WebUi>, cmd: &str, args: Value) -> Result<Value> {
                 disk_gb: Option<u32>,
                 #[serde(default)]
                 projects: Vec<String>,
+                #[serde(default)]
+                setup_handoffs: bool,
             }
             let a: Args = serde_json::from_value(args)?;
             let m = app
@@ -385,7 +387,10 @@ async fn dispatch(ui: &Arc<WebUi>, cmd: &str, args: Value) -> Result<Value> {
                     a.instance_type.unwrap_or_default(),
                     a.region.unwrap_or_default(),
                     a.disk_gb,
-                    a.projects,
+                    crate::app::CreateOptions {
+                        projects: a.projects,
+                        setup_handoffs: a.setup_handoffs,
+                    },
                 )
                 .await?;
             ui.emit_notify("Machine created", &format!("{} ({}) is up", m.record().name, m.id()));

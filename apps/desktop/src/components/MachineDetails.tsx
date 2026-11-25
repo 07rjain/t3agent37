@@ -101,7 +101,7 @@ export function MachineDetails({
         {gone ? null : <Disk m={m} usage={d?.diskUsage ?? m.diskUsage} sizes={sizes} busy={busy} onAction={onAction} />}
         <Agents m={m} d={d} signInUrl={signInUrl} pending={pending} onAction={onAction} />
         <GitHub m={m} signedIn={m.githubSignedIn || !!d?.githubSignedIn} signInCode={signInCode} pending={pending} onAction={onAction} />
-        <Connect m={m} d={d} pending={pending} onAction={onAction} />
+        {gone ? null : <Connect m={m} d={d} pending={pending} onAction={onAction} />}
         <Projects m={m} pickProject={pickProject} onAddProject={onAddProject} />
         <MachineMore
           m={m}
@@ -503,7 +503,6 @@ function Agents({
   );
 }
 
-/** T3 Connect: the user's phone or a browser reach the machine with their T3 account. */
 function Connect({
   m,
   d,
@@ -515,40 +514,67 @@ function Connect({
   pending: string | null;
   onAction: (a: Action) => void;
 }) {
-  const running = pending === ACTIONS.connect.busy;
+  const addressInput = useRef<HTMLInputElement>(null);
+  const [copiedAddress, setCopiedAddress] = useState<string | null>(null);
+  const address = d?.handoff?.address;
+  const running = !!d?.handoff?.settingUp || pending === ACTIONS.connect.busy;
+  const asleep = m.state === "asleep" || m.state === "sleeping";
+  const awake = m.state === "idle" || m.state === "working";
+  const reachable = awake && d?.handoff?.reachable === true;
+  const status = asleep ? "Asleep" : m.state === "waking" ? "Waking up" : reachable ? "Reachable"
+    : awake && d?.handoff?.reachable !== false ? "Unverified" : "Unreachable";
+
+  const copyAddress = async () => {
+    if (!address) return;
+    const copied = await navigator.clipboard?.writeText(address).then(() => true, () => false);
+    if (!copied) {
+      addressInput.current?.focus();
+      addressInput.current?.select();
+      if (!document.execCommand?.("copy")) return;
+    }
+    setCopiedAddress(address);
+  };
+
   return (
-    <Section title="other devices">
+    <Section title="Cross-machine handoffs">
       <ul className="lines">
         {d ? (
           <>
             <li className="line">
               <span className="line-main">T3 Connect</span>
-              {d.connect ? (
-                <span className="line-ok">
-                  <Icon name="check" size={10} /> on
+              {running ? (
+                <span className="line-status line-dim" role="status">
+                  <Dots /> Waiting for setup
+                </span>
+              ) : d.connect ? (
+                <span className={reachable ? "line-ok" : "line-status line-dim"} role="status">
+                  {reachable ? <Icon name="check" size={10} /> : null} {status}
                 </span>
               ) : (
                 <button
                   className="btn btn-sm btn-outline"
-                  disabled={!!pending || m.state === "missing"}
-                  aria-busy={running}
+                  disabled={!!pending}
                   onClick={() => onAction(ACTIONS.connect)}
                 >
-                  {running ? (
-                    <>
-                      <Dots /> {ACTIONS.connect.busy}
-                    </>
-                  ) : (
-                    ACTIONS.connect.label
-                  )}
+                  {ACTIONS.connect.label}
                 </button>
               )}
             </li>
-            {d.connect ? null : (
-              <li className="line">
-                <span className="line-main line-dim">T3 Code on your phone or in a browser, with your T3 account</span>
+            {address ? (
+              <li className="line handoff-address">
+                <input ref={addressInput} aria-label="Handoff address" value={address} readOnly />
+                <button type="button" className="btn btn-sm btn-outline" onClick={() => void copyAddress()}>
+                  {copiedAddress === address ? "Copied" : "Copy address"}
+                </button>
               </li>
-            )}
+            ) : null}
+            <li className="hint handoff-hint">
+              {running ? "Approve T3 Connect in the browser when prompted."
+                : !d.connect ? "Use your T3 account to make this machine discoverable for handoffs."
+                : asleep ? "Wake this machine before handing off from another device."
+                : reachable ? "Pick this machine by name in T3 Code when handing off."
+                : "T3 Connect is configured. Reachability will update while the machine is awake."}
+            </li>
           </>
         ) : (
           <Skeleton rows={1} />

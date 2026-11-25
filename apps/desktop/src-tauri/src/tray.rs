@@ -1,7 +1,7 @@
 //! The Tauri desktop tray app for t3agent37: tray icon, popover window, and UI commands.
 
 use crate::agent37::{self, Agent37, InstanceType, Region};
-use crate::app::{self, App, Costs, MachineState, MachineView, Setup};
+use crate::app::{self, App, Costs, CreateOptions, MachineState, MachineView, Setup};
 use crate::machine::provision::{SizeInfo, SIZES};
 use crate::machine::Event;
 use crate::mcp;
@@ -618,6 +618,7 @@ async fn create_machine(
     region: Option<Region>,
     disk_gb: Option<u32>,
     projects: Option<Vec<String>>,
+    setup_handoffs: Option<bool>,
 ) -> Res {
     ui.app()?
         .create_machine(
@@ -626,7 +627,10 @@ async fn create_machine(
             instance_type.unwrap_or_default(),
             region.unwrap_or_default(),
             disk_gb,
-            projects.unwrap_or_default(),
+            CreateOptions {
+                projects: projects.unwrap_or_default(),
+                setup_handoffs: setup_handoffs.unwrap_or_default(),
+            },
         )
         .await
         .map(drop)

@@ -1,18 +1,56 @@
 //! T3 Connect: T3's own way for other devices (a phone, a browser) to reach a machine with the
 //! user's T3 account, through a tunnel the machine dials out.
 
-use super::MachineRuntime;
+use super::{MachineRuntime, Power};
 use anyhow::{bail, Result};
 use reqwest::Method;
+use serde::Serialize;
 use serde_json::{json, Value};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const SETUP_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const URL_TIMEOUT: Duration = Duration::from_secs(120);
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoffStatus {
+    pub address: Option<String>,
+    pub reachable: Option<bool>,
+    pub setting_up: bool,
+    // T3 may resume with a cached probe from before the machine slept.
+    #[serde(skip)]
+    pub(super) check_after: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 impl MachineRuntime {
-    pub async fn turn_on_connect(&self) -> Result<()> {
+    pub async fn turn_on_connect(self: &Arc<Self>) -> Result<()> {
+        let machine = self.clone();
+        // Browser approval can outlive the UI request that started it.
+        tokio::spawn(async move { machine.setup_connect().await }).await?
+    }
+
+    async fn setup_connect(&self) -> Result<()> {
+        let _operation = self.connect_operation.lock().await;
+        self.handoff.lock().unwrap().setting_up = true;
+        self.shared.changed();
+        let result = self.enable_connect().await;
+        self.handoff.lock().unwrap().setting_up = false;
+        self.shared.changed();
+        result
+    }
+
+    pub fn handoff_status(&self) -> HandoffStatus {
+        self.handoff.lock().unwrap().clone()
+    }
+
+    async fn enable_connect(&self) -> Result<()> {
         self.ensure_awake().await?;
+        if let Ok(state) = self.connect_api(Method::GET, "link-state", None).await
+            && self.apply_connect_state(&state)
+        {
+            return Ok(());
+        }
         let s = self.watchdog_get("/t3boat-status?fresh").await?;
         if s.busy {
             bail!("an agent is working; turn T3 Connect on once it finishes");
@@ -20,27 +58,61 @@ impl MachineRuntime {
         if s.waiting_threads > 0 {
             bail!("an agent is waiting on you there; answer it, then turn T3 Connect on");
         }
-        self.kept_awake(self.run_connect_setup()).await?;
-        let state = self.connect_api(Method::GET, "link-state", None).await?;
-        let preferences = json!({
-            "publishAgentActivity": state["publishAgentActivity"].as_bool().unwrap_or(false),
-            "holdWebhooksWhileOffline": true,
-        });
-        self.connect_api(Method::POST, "preferences", Some(preferences)).await?;
-        self.update_record(|r| r.connect = true);
-        Ok(())
+        self.kept_awake(async {
+            self.run_connect_setup().await?;
+            let state = self.connect_api(Method::GET, "link-state", None).await?;
+            if !self.apply_connect_state(&state) {
+                bail!("T3 Connect has no active tunnel. Check the approval in your browser and try again.");
+            }
+            let preferences = json!({
+                "publishAgentActivity": state["publishAgentActivity"].as_bool().unwrap_or(false),
+                "holdWebhooksWhileOffline": true,
+            });
+            if let Err(error) = self.connect_api(Method::POST, "preferences", Some(preferences)).await {
+                tracing::warn!("setting T3 Connect preferences for {}: {error:#}", self.id());
+            }
+            Ok(())
+        }).await
     }
 
     pub(super) async fn refresh_connect(&self) {
+        let Ok(_operation) = self.connect_operation.try_lock() else { return };
         match self.connect_api(Method::GET, "link-state", None).await {
             Ok(state) => {
-                let on = state["linked"] == true && state["managedTunnelActive"] == true;
-                if self.record().connect != on {
-                    self.update_record(|r| r.connect = on);
-                }
+                self.apply_connect_state(&state);
             }
-            Err(e) => tracing::warn!("reading T3 Connect state of {}: {e:#}", self.id()),
+            Err(e) => {
+                if self.handoff.lock().unwrap().reachable.take().is_some() {
+                    self.shared.changed();
+                }
+                tracing::warn!("reading T3 Connect state of {}: {e:#}", self.id());
+            }
         }
+    }
+
+    fn apply_connect_state(&self, state: &Value) -> bool {
+        let on = state["linked"] == true
+            && state["managedTunnelActive"] == true
+            && state["linkRevoked"] != true;
+        let changed = {
+            let mut handoff = self.handoff.lock().unwrap();
+            let address = if on { state["tunnelHostname"].as_str().and_then(handoff_address) } else { None };
+            let reachable = if on && self.power() == Power::Running {
+                checked_reachability(&state["reachability"], handoff.check_after)
+            } else {
+                None
+            };
+            let changed = handoff.address != address || handoff.reachable != reachable;
+            handoff.address = address;
+            handoff.reachable = reachable;
+            changed
+        };
+        if self.record().connect != on {
+            self.update_record(|r| r.connect = on);
+        } else if changed {
+            self.shared.changed();
+        }
+        on
     }
 
     async fn run_connect_setup(&self) -> Result<()> {
@@ -115,6 +187,34 @@ impl MachineRuntime {
     }
 }
 
+fn checked_reachability(probe: &Value, check_after: Option<chrono::DateTime<chrono::Utc>>) -> Option<bool> {
+    if let Some(after) = check_after {
+        let checked = chrono::DateTime::parse_from_rfc3339(probe["checkedAt"].as_str()?).ok()?;
+        if checked <= after {
+            return None;
+        }
+    }
+    match probe["status"].as_str()? {
+        "reachable" => Some(true),
+        "unreachable" => Some(false),
+        _ => None,
+    }
+}
+
+fn handoff_address(hostname: &str) -> Option<String> {
+    if !hostname.contains('.') || hostname.len() > 253 || !hostname.split('.').all(|label| {
+        !label.is_empty() && label.len() <= 63
+            && !label.starts_with('-') && !label.ends_with('-')
+            && label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    }) {
+        return None;
+    }
+    match url::Host::parse(hostname).ok()? {
+        url::Host::Domain(hostname) => Some(format!("https://{hostname}")),
+        _ => None,
+    }
+}
+
 fn is_trusted_connect_host(host: &str) -> bool {
     let h = host.to_ascii_lowercase();
     matches!(h.as_str(), "t3.codes" | "t3.chat" | "t3.gg")
@@ -125,4 +225,28 @@ fn is_trusted_connect_host(host: &str) -> bool {
 
 fn last_line(log: &str) -> &str {
     log.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or("no output")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builds_an_https_origin_only_from_a_hostname() {
+        assert_eq!(handoff_address("vm.connect.example.com").as_deref(), Some("https://vm.connect.example.com"));
+        for invalid in ["localhost", "127.0.0.1", "host.example:1234", "host.example/path", "user@host.example"] {
+            assert_eq!(handoff_address(invalid), None);
+        }
+    }
+
+    #[test]
+    fn waits_for_a_new_tunnel_probe_after_sleep() {
+        let probe = json!({ "status": "reachable", "checkedAt": "2026-11-24T10:00:00Z" });
+        let after = "2026-11-24T10:01:00Z".parse().unwrap();
+        assert_eq!(checked_reachability(&probe, None), Some(true));
+        assert_eq!(checked_reachability(&probe, Some(after)), None);
+        let probe = json!({ "status": "unreachable", "checkedAt": "2026-11-24T10:02:00Z" });
+        assert_eq!(checked_reachability(&probe, Some(after)), Some(false));
+        assert_eq!(checked_reachability(&Value::Null, None), None);
+    }
 }

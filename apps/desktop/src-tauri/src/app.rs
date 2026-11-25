@@ -2,7 +2,7 @@
 //! UI-agnostic; the Tauri tray app and the headless `t3agent37-daemon` both drive it.
 
 use crate::agent37::{self, Agent37, BillingInfo, InstanceType, Region};
-use crate::machine::{provision, DiskUsage, Event, MachineRuntime, Power, Shared, WatchdogPhase};
+use crate::machine::{provision, DiskUsage, Event, HandoffStatus, MachineRuntime, Power, Shared, WatchdogPhase};
 use crate::proxy;
 use crate::store::{Doomed, Settings, Spend, State, Store};
 use crate::t3desktop::T3Desktop;
@@ -23,6 +23,12 @@ const PORTS: u16 = 1000;
 const REAP_RETRY: Duration = Duration::from_secs(60);
 /// Pending this long since this launch first tried it: the user is told, and it is tried on.
 const REAP_WARN: Duration = Duration::from_secs(15 * 60);
+
+#[derive(Default)]
+pub struct CreateOptions {
+    pub projects: Vec<String>,
+    pub setup_handoffs: bool,
+}
 
 /// Why the app cannot run yet, in the order the user has to fix it.
 #[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
@@ -434,8 +440,8 @@ impl App {
         self.shared.changed();
     }
 
-    /// Creates a new Agent37 machine, provisions T3 Code + supervisor + read-only watchdog,
-    /// starts its localhost proxy, and optionally clones `projects`.
+    /// Provisions an Agent37 machine with T3 Code and starts its localhost proxy.
+    /// Clones projects and starts handoff setup in the background if requested.
     pub async fn create_machine(
         self: &Arc<Self>,
         name: &str,
@@ -443,7 +449,7 @@ impl App {
         instance_type: InstanceType,
         region: Region,
         disk_gb: Option<u32>,
-        projects: Vec<String>,
+        options: CreateOptions,
     ) -> Result<Arc<MachineRuntime>> {
         if !valid_name(name) {
             bail!("machine names are 1-32 lowercase letters, digits or dashes, starting with a letter or digit");
@@ -509,10 +515,13 @@ impl App {
         }
         let (app, m) = (self.clone(), machine.clone());
         tokio::spawn(async move {
-            for id in projects {
+            for id in options.projects {
                 if let Err(e) = app.add_project(&m, &id).await {
                     app.shared.notify(format!("A project didn't reach {}", m.record().name), format!("{e:#}"));
                 }
+            }
+            if options.setup_handoffs && let Err(e) = m.turn_on_connect().await {
+                app.shared.notify(format!("Couldn't set up handoffs for {}", m.record().name), format!("{e:#}"));
             }
         });
         if let Err(e) = self.pair(&machine) {
@@ -798,6 +807,7 @@ pub struct MachineDetails {
     pub t3_version: String,
     pub created_at: i64,
     pub connect: bool,
+    pub handoff: HandoffStatus,
 }
 
 #[derive(Serialize)]
@@ -842,6 +852,7 @@ impl App {
             t3_version: record.t3_version,
             created_at: record.created_at,
             connect: record.connect,
+            handoff: machine.handoff_status(),
         })
     }
 

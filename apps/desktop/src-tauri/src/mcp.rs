@@ -358,7 +358,8 @@ async fn run(app: &Arc<App>, call: Call) -> Result<String> {
         Call::CreateMachine { name, size, instance_type, region, disk_gb, projects } => {
             let ty = instance_type.as_deref().map(InstanceType::from_str).transpose()?.unwrap_or_default();
             let reg = region.as_deref().map(Region::from_str).transpose()?.unwrap_or_default();
-            let m = app.create_machine(&name, size.as_deref().unwrap_or("small"), ty, reg, disk_gb, projects).await?;
+            let options = crate::app::CreateOptions { projects, ..Default::default() };
+            let m = app.create_machine(&name, size.as_deref().unwrap_or("small"), ty, reg, disk_gb, options).await?;
             format!(
                 "Created {} ({}) on Agent37. T3 Code now asks the user to add it as a backend; tell them to confirm.",
                 m.record().name,

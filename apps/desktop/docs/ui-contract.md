@@ -71,7 +71,12 @@ interface MachineDetails {
   agents: { name: string; signedIn: boolean }[];    // names match MachineView.signedOut / sign_in_agent
   t3Version: string;          // T3 server version on the machine, e.g. "0.0.21"
   createdAt: number;          // unix secs
-  connect: boolean;           // T3 Connect is on: the user's phone or a browser reach it with their T3 account
+  connect: boolean;           // T3 Connect tunnel is configured as of the last check
+  handoff?: {
+    address: string | null;   // HTTPS origin from T3 Connect
+    reachable: boolean | null; // null while asleep, unchecked, or unavailable
+    settingUp: boolean;
+  };
 }
 ```
 
@@ -80,7 +85,7 @@ interface MachineDetails {
 | command | args | notes |
 |---|---|---|
 | `get_state` | – | |
-| `create_machine` | `{ name, size, projects? }` | resolves when done (~1 min); a `creating` row shows progress meanwhile; at the end T3 Code shows its own "Add backend?" dialog. `projects`: `local_projects` ids, added one after another once it is up (progress in `projects`; a failure notifies) |
+| `create_machine` | `{ name, size, projects?, setupHandoffs? }` | Resolves when the machine is ready. T3 Code opens its "Add backend?" dialog. The backend adds the selected `local_projects` ids in order, then starts T3 Connect setup if `setupHandoffs` is true. |
 | `local_projects` | – | → `{ id, title, path, repoKey, icon: string \| null }[]`: this computer's T3 Code projects that have a git remote (what T3's own "Add to another machine" accepts), pinned first then most recent, read from T3 Code's server with t3boat's own session. `icon`: favicon as a `data:` URL, null if none (UI shows a letter tile). A project counts as on a machine when one of its `projects` has the same `repoKey` |
 | `add_project` | `{ id, projectId }` | adds that project the way T3 Code's "Add to another machine" does: `projectClone.start` on the machine (clone over HTTPS from its remote, registered as a T3 project, progress in T3 Code too), then its `.env` files via `projects.writeFile`. Resolves once cloned; not a tracked action, the machine's `projects` show progress. A clone the git host refuses rejects with a pointer to T3 Code's Settings → Source control for that machine |
 | `wake_machine` | `{ id }` | |
@@ -88,7 +93,7 @@ interface MachineDetails {
 | `open_machine` | `{ id, thread? }` | brings T3 Code forward, into `thread` (an id from `latest_thread`) if given; re-sends the "add to T3 Code" dialog if not paired |
 | `pair_machine` | `{ id }` | re-sends T3 Code's "add backend" dialog (secondary "Add to T3 Code again") |
 | `sign_in_agent` | `{ id, agent }` | agent = a `signedOut` name ("Claude", "Codex"); resolves once signed in (user finishes in the browser, up to 10 min) |
-| `turn_on_connect` | `{ id }` | turns on T3 Connect with T3's own `t3 up --connect` on the machine: T3's sign-in page opens in the browser, the user approves it, T3 restarts there; resolves once other devices can reach it (up to ~15 min). Rejects while an agent works or waits on the user there (the restart would stop it, or expire the approval it waits on). Details shows "other devices · T3 Connect" with Turn on, or "on" |
+| `turn_on_connect` | `{ id }` | Runs `t3 up --connect` on the machine and opens T3's browser approval. Setup can take up to 15 minutes and can restart T3 on the machine, so it rejects while an agent is working or waiting on the user. Machine details shows setup progress, the last reachability result while awake, and a copyable address when T3 reports one. |
 | `keep_awake` | `{ id, minutes }` | keeps the machine up that long even unused (`null`: until stopped, i.e. no auto sleep; 0 ends it; "Sleep now" ends it too); wakes it if asleep; enforced on the machine, so it holds with the laptop closed. Details has an **Auto sleep** switch (on = `!keepAwakeForever`; off → `null`, on → `0`) and, while auto sleep is on, a one-time "Stay awake for…" (15m · 30m · 1h · 2h) that runs out by itself, with Stop (`0`) while `keepAwakeUntil` is set |
 | `resize_machine` | `{ id, size }` | asleep: applies on next wake; idle: sleeps and wakes onto it now, keeping a "keep awake"; working (an agent or a build), or an agent there waits on the user: applies after it next sleeps, never mid-turn |
 | `delete_machine` | `{ id, discard? }` | permanent; UI must confirm first. Rejects while an agent or build works on it, or while its state can't be told yet (e.g. mid-wake); then offer "Delete anyway" = `discard: true`. An agent there waiting on the user doesn't stop it. T3 Code cannot be told to forget a backend, so deleting a paired machine brings T3 Code to the front with a notification naming the entry to remove under Settings → Environments. Its local port is never given to another machine, so that entry can't reach one. Resolves once the machine is gone here; its sandbox and snapshot are deleted on Boat in the background until Boat confirms (retried, also across launches) |

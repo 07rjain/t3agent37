@@ -60,7 +60,7 @@ export const ACTIONS = {
   wake: { cmd: "wake_machine", label: "Wake now", busy: "Waking…" },
   retry: { cmd: "wake_machine", label: "Try waking", busy: "Waking…" },
   sleep: { cmd: "sleep_machine", label: "Sleep now", busy: "Sleeping…" },
-  connect: { cmd: "turn_on_connect", label: "Turn on", busy: "Approve in browser…" },
+  connect: { cmd: "turn_on_connect", label: "Set up handoffs", busy: "Setting up T3 Connect…" },
   github: { cmd: "sign_in_github", label: "Sign in GitHub", busy: "Approve in browser…" },
   remove: { cmd: "delete_machine", label: "Remove", busy: "Removing…", discard: true },
   del: { cmd: "delete_machine", label: "Delete", busy: "Deleting…", discard: false },

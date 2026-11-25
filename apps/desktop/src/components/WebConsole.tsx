@@ -323,7 +323,7 @@ function ReadyConsole({ state, toast }: { state: UiState; toast: (t: string, ton
           return;
         case "turn_on_connect":
           await call("turn_on_connect", { id: m.id });
-          toast(`${m.name} is reachable from your other devices`, "info");
+          toast(`T3 Connect is set up for ${m.name}`, "info");
           return;
         case "keep_awake":
           await call("keep_awake", { id: m.id, minutes: a.minutes });

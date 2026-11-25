@@ -24,6 +24,7 @@ export interface NewMachineSpec {
   region: Region;
   diskGb: number;
   projects: string[];
+  setupHandoffs: boolean;
 }
 
 interface Props {
@@ -47,6 +48,7 @@ export function NewMachine({ state, onNameChange, onCreate, onBack }: Props) {
   const input = useRef<HTMLInputElement>(null);
   const projects = useLocalProjects();
   const [picked, setPicked] = useState<string[]>([]);
+  const [setupHandoffs, setSetupHandoffs] = useState(false);
   const toggle = (id: string) => setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
 
   useEffect(() => {
@@ -80,7 +82,7 @@ export function NewMachine({ state, onNameChange, onCreate, onBack }: Props) {
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (!problem && shape) onCreate({ name, size, instanceType, region, diskGb: disk, projects: picked });
+    if (!problem && shape) onCreate({ name, size, instanceType, region, diskGb: disk, projects: picked, setupHandoffs });
   };
 
   return (
@@ -239,6 +241,20 @@ export function NewMachine({ state, onNameChange, onCreate, onBack }: Props) {
           </div>
           <span className="hint">Optional · cloned from git once it's up, .env files included</span>
         </fieldset>
+        <div className="field">
+          <label className="handoff-option">
+            <input
+              type="checkbox"
+              checked={setupHandoffs}
+              onChange={(e) => setSetupHandoffs(e.target.checked)}
+              aria-describedby="setup-handoffs-hint"
+            />
+            Set up cross-machine handoffs
+          </label>
+          <span className="hint" id="setup-handoffs-hint">
+            Approve T3 Connect in your browser after launch. Other machines can then hand off tasks here while it’s awake.
+          </span>
+        </div>
       </div>
       <div className="view-foot">
         <button type="submit" className="btn btn-solid btn-lg" disabled={!!problem || !shape}>

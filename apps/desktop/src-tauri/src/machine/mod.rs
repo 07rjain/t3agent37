@@ -11,6 +11,8 @@ pub mod provision;
 pub mod signin;
 mod work;
 
+pub use connect::HandoffStatus;
+
 use crate::agent37::{self, Agent37, Instance};
 use crate::proxy::auth::Auth;
 use crate::proxy::cache::{self, Cache};
@@ -211,6 +213,8 @@ pub struct MachineRuntime {
     /// Its T3 projects as last read, and those t3agent37 is adding.
     projects: Mutex<Vec<projects::MachineProject>>,
     adding: Mutex<Vec<projects::MachineProject>>,
+    handoff: Mutex<HandoffStatus>,
+    connect_operation: tokio::sync::Mutex<()>,
 }
 
 impl MachineRuntime {
@@ -235,6 +239,8 @@ impl MachineRuntime {
             sleep_failure: Mutex::new(None),
             projects: Mutex::new(Vec::new()),
             adding: Mutex::new(Vec::new()),
+            handoff: Mutex::new(HandoffStatus::default()),
+            connect_operation: tokio::sync::Mutex::new(()),
         };
         if let Some(shell) = shell {
             this.set_projects_from(&shell);
@@ -300,6 +306,9 @@ impl MachineRuntime {
         if changed {
             if p != Power::Running {
                 *self.watchdog.lock().unwrap() = None;
+                let mut handoff = self.handoff.lock().unwrap();
+                handoff.reachable = None;
+                handoff.check_after = Some(chrono::Utc::now());
             }
             self.shared.changed();
         }
@@ -977,6 +986,7 @@ impl MachineRuntime {
         let mut last_api_poll: Option<Instant> = None;
         let mut last_due_wake: Option<Instant> = None;
         let mut last_link_check: Option<Instant> = None;
+        let mut last_connect_check: Option<Instant> = None;
         let mut power_rx = self.subscribe_power();
         let mut watchdog_failures = 0u32;
         let mut was_busy = false;
@@ -1005,6 +1015,11 @@ impl MachineRuntime {
             let came_up = running && !was_running;
             was_running = running;
             if running {
+                if came_up || last_connect_check.is_none_or(|t| t.elapsed() >= API_POLL) {
+                    last_connect_check = Some(Instant::now());
+                    let this = self.clone();
+                    tokio::spawn(async move { this.refresh_connect().await });
+                }
                 if came_up || last_link_check.is_none_or(|t| t.elapsed() >= LINK_CHECK) {
                     last_link_check = Some(Instant::now());
                     let this = self.clone();
@@ -1014,7 +1029,6 @@ impl MachineRuntime {
                         }
                         if came_up {
                             this.refresh_projects().await;
-                            this.refresh_connect().await;
                             this.refresh_github().await;
                         }
                     });

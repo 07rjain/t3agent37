@@ -265,6 +265,22 @@ button.row-name {
 .line-dim {
   color: var(--muted);
 }
+
+.handoff-address input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: 400 11px var(--font-mono);
+  text-overflow: ellipsis;
+  user-select: text;
+}
+
+.handoff-hint {
+  display: block;
+  padding: 3px 0;
+}
 .line-status {
   display: inline-flex;
   align-items: center;

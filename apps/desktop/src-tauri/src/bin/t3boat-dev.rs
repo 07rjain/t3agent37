@@ -139,7 +139,7 @@ async fn command(app: &Arc<App>, words: &[String]) -> anyhow::Result<()> {
             let ty = words.get(3).map(|s| InstanceType::from_str(s)).transpose()?.unwrap_or_default();
             let region = words.get(4).map(|s| Region::from_str(s)).transpose()?.unwrap_or_default();
             let disk = words.get(5).map(|s| s.parse::<u32>()).transpose()?;
-            let m = app.create_machine(&arg(1), &size, ty, region, disk, Vec::new()).await?;
+            let m = app.create_machine(&arg(1), &size, ty, region, disk, Default::default()).await?;
             println!("CREATED {} on http://localhost:{}", m.id(), m.record().local_port);
         }
         Some("pair") => app.pair(&*app.machine(&arg(1))?)?,

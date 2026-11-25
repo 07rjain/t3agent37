@@ -159,8 +159,9 @@ export interface MachineDetails {
   agents: { name: string; signedIn: boolean }[];
   t3Version: string;
   createdAt: number; // unix secs
-  /** T3 Connect is on: the user's other devices reach it with their T3 account */
+  /** T3 Connect has an active tunnel, based on the last check while awake. */
   connect: boolean;
+  handoff?: { address: string | null; reachable: boolean | null; settingUp: boolean };
   instanceType: InstanceType;
   region: Region;
   diskGb: number;
@@ -174,7 +175,15 @@ export interface Commands {
   get_state: [undefined, UiState];
   save_api_key: [{ apiKey: string }, void]; // stays on this computer, never on a machine
   create_machine: [
-    { name: string; size: string; instanceType?: InstanceType; region?: Region; diskGb?: number; projects?: string[] },
+    {
+      name: string;
+      size: string;
+      instanceType?: InstanceType;
+      region?: Region;
+      diskGb?: number;
+      projects?: string[];
+      setupHandoffs?: boolean;
+    },
     void,
   ]; // projects: LocalProject ids to add once up
   local_projects: [undefined, LocalProject[]]; // pinned first, then most recent
@@ -188,7 +197,7 @@ export interface Commands {
   keep_awake: [{ id: string; minutes: number | null }, void]; // null: until stopped; 0: stop
   sign_in_agent: [{ id: string; agent: string }, void];
   sign_in_github: [{ id: string; token?: string }, void]; // no token: browser device login
-  turn_on_connect: [{ id: string }, void]; // resolves once reachable, after the browser sign-in
+  turn_on_connect: [{ id: string }, void]; // resolves after browser approval and tunnel setup
   latest_thread: [{ id: string }, string | null]; // thread id
   get_machine_details: [{ id: string }, MachineDetails];
   add_mcp: [{ client: McpClient }, void];

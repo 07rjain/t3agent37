@@ -257,6 +257,7 @@ export const mockBackend = (): MockBackend => (shared ??= create());
 
 function create(): MockBackend {
   let state = seed();
+  const connectPending = new Set<string>();
   const listeners = new Set<(s: UiState) => void>();
 
   const emit = () => {
@@ -298,7 +299,7 @@ function create(): MockBackend {
       emit();
     },
 
-    async create_machine({ name, size, instanceType = "default", region = "us", diskGb, projects }) {
+    async create_machine({ name, size, instanceType = "default", region = "us", diskGb, projects, setupHandoffs }) {
       if (state.machines.some((m) => m.name === name)) throw `a machine called "${name}" already exists`;
       const shape = shapeOf(size);
       if (shape.vmOnly && instanceType === "default") throw `size ${size} needs instance type vm or performance`;
@@ -341,6 +342,7 @@ function create(): MockBackend {
       );
       emit();
       for (const p of projects ?? []) await handlers.add_project({ id, projectId: p });
+      if (setupHandoffs) void handlers.turn_on_connect({ id });
     },
 
     async local_projects() {
@@ -429,10 +431,17 @@ function create(): MockBackend {
     },
 
     async turn_on_connect({ id }) {
-      await wait(4000);
       find(id);
-      connectOn.add(id);
-      emit(); // the details view refetches on every state event
+      if (connectOn.has(id) || connectPending.has(id)) return;
+      connectPending.add(id);
+      emit();
+      try {
+        await wait(4000);
+        if (state.machines.some((m) => m.id === id)) connectOn.add(id);
+      } finally {
+        connectPending.delete(id);
+        emit();
+      }
     },
 
     async sign_in_agent({ id, agent }) {
@@ -493,6 +502,11 @@ function create(): MockBackend {
         t3Version: "0.0.21",
         createdAt: Math.floor(Date.now() / 1000) - extra.days * 86400,
         connect: connectOn.has(id),
+        handoff: {
+          address: connectOn.has(id) ? `https://${m.name}.example.com` : null,
+          reachable: connectOn.has(id) && (m.state === "idle" || m.state === "working") ? true : null,
+          settingUp: connectPending.has(id),
+        },
       };
     },
 
