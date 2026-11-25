@@ -547,9 +547,21 @@ function Connect({
                   <Dots /> Waiting for setup
                 </span>
               ) : d.connect ? (
-                <span className={reachable ? "line-ok" : "line-status line-dim"} role="status">
-                  {reachable ? <Icon name="check" size={10} /> : null} {status}
-                </span>
+                <>
+                  <span className={reachable ? "line-ok" : "line-status line-dim"} role="status">
+                    {reachable ? <Icon name="check" size={10} /> : null} {status}
+                  </span>
+                  {awake && !reachable ? (
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-outline"
+                      disabled={!!pending}
+                      onClick={() => onAction(ACTIONS.connect)}
+                    >
+                      Check connection
+                    </button>
+                  ) : null}
+                </>
               ) : (
                 <button
                   className="btn btn-sm btn-outline"
@@ -569,7 +581,7 @@ function Connect({
               </li>
             ) : null}
             <li className="hint handoff-hint">
-              {running ? "Approve T3 Connect in the browser when prompted."
+              {running ? d.connect ? "Waiting for the T3 Connect tunnel to answer." : "Approve T3 Connect in the browser when prompted."
                 : !d.connect ? "Use your T3 account to make this machine discoverable for handoffs."
                 : asleep ? "Wake this machine before handing off from another device."
                 : reachable ? "Pick this machine by name in T3 Code when handing off."

@@ -8,6 +8,7 @@
 ## Cross-machine handoffs
 
 - Local pairing and wake-on-demand run through the loopback proxy. Cross-machine setup is opt-in and uses T3 Connect's browser approval. Keep provisioning independent of the outcome of that approval.
+- Use T3's relay installer and `t3 connect link --headless` for enrollment. Apply the link by restarting T3 through the Agent37 supervisor after checking for active work. `t3 up` manages its own service.
 - Take the copyable address and reachability from T3 Connect's link state. A sleeping machine needs to wake before it can receive a handoff through its T3 Connect tunnel. Keep handoff addresses out of telemetry. See the [UI contract](apps/desktop/docs/ui-contract.md).
 
 ## Telemetry

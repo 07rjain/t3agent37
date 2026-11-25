@@ -4,6 +4,12 @@ All notable changes to **t3agent37** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-11-25
+
+### Fixed
+- After browser approval, handoff setup restarts the T3 server managed by t3agent37 once the machine is idle and waits for its T3 Connect address to become reachable.
+- Use **Check connection** in machine details to retry reachability for a configured tunnel without restarting T3.
+
 ## [0.4.0] - 2026-11-25
 
 ### Added

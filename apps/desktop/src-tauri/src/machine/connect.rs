@@ -1,8 +1,9 @@
 //! T3 Connect: T3's own way for other devices (a phone, a browser) to reach a machine with the
 //! user's T3 account, through a tunnel the machine dials out.
 
-use super::{MachineRuntime, Power};
-use anyhow::{bail, Result};
+use super::{provision, MachineRuntime, Power};
+use crate::proxy::upstream;
+use anyhow::{bail, Context, Result};
 use reqwest::Method;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -11,6 +12,7 @@ use std::time::{Duration, Instant};
 
 const SETUP_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const URL_TIMEOUT: Duration = Duration::from_secs(120);
+const TUNNEL_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,10 +48,43 @@ impl MachineRuntime {
 
     async fn enable_connect(&self) -> Result<()> {
         self.ensure_awake().await?;
-        if let Ok(state) = self.connect_api(Method::GET, "link-state", None).await
-            && self.apply_connect_state(&state)
-        {
-            return Ok(());
+        self.kept_awake(async {
+            let state = self.connect_api(Method::GET, "link-state", None).await?;
+            let already_configured = self.apply_connect_state(&state);
+            if already_configured {
+                if self.handoff_status().reachable != Some(true)
+                    && let Err(error) = self.connect_api(Method::POST, "reachability", None).await
+                {
+                    tracing::debug!("requesting a T3 Connect probe for {}: {error:#}", self.id());
+                }
+            } else {
+                self.ensure_idle_for_connect_restart().await?;
+                self.install_connect_relay_client().await?;
+                self.run_connect_setup().await?;
+                {
+                    let _transition = self.waking.lock().await;
+                    // Approval can take minutes. A task that started meanwhile must finish first.
+                    self.ensure_idle_for_connect_restart().await?;
+                    provision::restart_supervised_t3(&self.shared.agent37, &self.sandbox_id()).await?;
+                }
+            }
+            let state = self.wait_for_connect().await?;
+            if !already_configured {
+                let preferences = json!({
+                    "publishAgentActivity": state["publishAgentActivity"].as_bool().unwrap_or(false),
+                    "holdWebhooksWhileOffline": true,
+                });
+                if let Err(error) = self.connect_api(Method::POST, "preferences", Some(preferences)).await {
+                    tracing::warn!("setting T3 Connect preferences for {}: {error:#}", self.id());
+                }
+            }
+            Ok(())
+        }).await
+    }
+
+    async fn ensure_idle_for_connect_restart(&self) -> Result<()> {
+        if self.power() != Power::Running || self.is_stopping() {
+            bail!("The machine is changing power state. Wait for it to be awake before setting up handoffs.");
         }
         let s = self.watchdog_get("/t3boat-status?fresh").await?;
         if s.busy {
@@ -58,21 +93,70 @@ impl MachineRuntime {
         if s.waiting_threads > 0 {
             bail!("an agent is waiting on you there; answer it, then turn T3 Connect on");
         }
-        self.kept_awake(async {
-            self.run_connect_setup().await?;
-            let state = self.connect_api(Method::GET, "link-state", None).await?;
-            if !self.apply_connect_state(&state) {
-                bail!("T3 Connect has no active tunnel. Check the approval in your browser and try again.");
+        Ok(())
+    }
+
+    async fn install_connect_relay_client(&self) -> Result<()> {
+        // The CLI's `connect link` prompts if the connector is missing. Use T3's own
+        // installer RPC with the existing VM session before starting headless approval.
+        let headers = self.edge_headers();
+        let url = self.upstream_url();
+        let token = self.upstream_token();
+        let status = upstream::call_with_headers(&url, &token, &headers, "cloud.getRelayClientStatus", json!({}))
+            .await
+            .context("checking the machine's T3 Connect relay client")?;
+        if status["status"] == "available" {
+            return Ok(());
+        }
+        let (installed, _) = upstream::subscribe_until_with_headers(
+            &url,
+            &token,
+            &headers,
+            "cloud.installRelayClient",
+            json!({}),
+            TUNNEL_TIMEOUT,
+            |event| (event["type"] == "complete").then(|| event["status"]["status"] == "available"),
+        )
+        .await
+        .context("installing the machine's T3 Connect relay client")?;
+        if installed != Some(true) {
+            bail!("T3 Code could not install the relay client on this machine.");
+        }
+        Ok(())
+    }
+
+    async fn wait_for_connect(&self) -> Result<Value> {
+        let deadline = tokio::time::Instant::now() + TUNNEL_TIMEOUT;
+        let mut reason = None;
+        loop {
+            if self.power() != Power::Running || self.is_stopping() {
+                bail!("The machine went offline during T3 Connect setup. Wake it and try again.");
             }
-            let preferences = json!({
-                "publishAgentActivity": state["publishAgentActivity"].as_bool().unwrap_or(false),
-                "holdWebhooksWhileOffline": true,
-            });
-            if let Err(error) = self.connect_api(Method::POST, "preferences", Some(preferences)).await {
-                tracing::warn!("setting T3 Connect preferences for {}: {error:#}", self.id());
+            // The server can answer link-state before registration and DNS are ready.
+            match tokio::time::timeout_at(deadline, self.connect_api(Method::GET, "link-state", None)).await {
+                Ok(Ok(state)) => {
+                    self.apply_connect_state(&state);
+                    let status = self.handoff_status();
+                    if status.address.is_some() && status.reachable == Some(true) {
+                        return Ok(state);
+                    }
+                    reason = state["reachability"]["reason"].as_str().map(str::to_owned);
+                }
+                _ if tokio::time::Instant::now() >= deadline => break,
+                _ => {}
             }
-            Ok(())
-        }).await
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + Duration::from_secs(2))).await;
+        }
+        if self.record().connect {
+            if let Some(reason) = reason {
+                bail!("T3 Connect could not reach the machine. {reason}");
+            }
+            bail!("T3 Connect is configured, but the tunnel did not become reachable. Check T3 Connect for this machine in T3 Code → Settings → Sharing & access.");
+        }
+        bail!("T3 Code restarted but did not activate a T3 Connect tunnel. Try setting up handoffs again.");
     }
 
     pub(super) async fn refresh_connect(&self) {
@@ -121,15 +205,36 @@ impl MachineRuntime {
         let dir = a37
             .exec_ok(
                 &id,
-                "d=$(mktemp -d); \
-                 (\"$HOME/.local/bin/t3\" up --connect --headless --yes > \"$d/log\" 2>&1; echo $? > \"$d/exit\") \
-                 </dev/null >/dev/null 2>&1 & echo \"$d\"",
+                r#"set -e
+                    d=$(mktemp -d)
+                    (
+                        "$HOME/.local/bin/t3" connect link --headless &
+                        child=$!
+                        printf '%s\n' "$child" >"$d/pid"
+                        status=0
+                        wait "$child" || status=$?
+                        printf '%s\n' "$status" >"$d/exit"
+                    ) </dev/null >"$d/log" 2>&1 &
+                    printf '%s\n' "$d"
+                "#,
                 30,
             )
             .await?;
         let dir = super::github::validate_tmp_dir(dir.lines().last().unwrap_or_default().trim())?;
         let result = self.finish_connect_setup(&dir).await;
-        let _ = a37.exec(&id, &format!("rm -rf '{dir}'; pkill -f '[t]3 up --connect' 2>/dev/null || true"), None, 30).await;
+        let cleanup = format!(r#"
+            d='{dir}'
+            if [ ! -f "$d/exit" ] && read -r pid <"$d/pid"; then
+                case "$pid" in
+                    ''|*[!0-9]*) ;;
+                    *) case "$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)" in
+                        *" connect link --headless "*) kill -TERM "$pid" 2>/dev/null || true ;;
+                    esac ;;
+                esac
+            fi
+            rm -rf "$d"
+        "#);
+        let _ = a37.exec(&id, &cleanup, None, 30).await;
         result
     }
 

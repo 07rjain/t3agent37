@@ -293,6 +293,29 @@ pub async fn ensure_supervisor_running(agent37: &Agent37, instance_id: &str) -> 
     Ok(())
 }
 
+/// Applies configuration changes to the same T3 server the Agent37 proxy uses.
+pub(super) async fn restart_supervised_t3(agent37: &Agent37, instance_id: &str) -> Result<()> {
+    let script = r#"
+        set -e
+        dir="$HOME/.t3agent37"
+        read -r supervisor <"$dir/supervisor.pid"
+        case "$supervisor" in
+            ''|*[!0-9]*) echo "Invalid T3 supervisor PID" >&2; exit 1 ;;
+        esac
+        if [ "$supervisor" -le 1 ]; then
+            echo "Invalid T3 supervisor PID" >&2
+            exit 1
+        fi
+        case "$(tr '\0' ' ' <"/proc/$supervisor/cmdline" 2>/dev/null)" in
+            *" $dir/supervisor.mjs "*|*" /usr/local/lib/t3agent37/supervisor.mjs "*) ;;
+            *) echo "T3 supervisor is not running" >&2; exit 1 ;;
+        esac
+        kill -USR2 "$supervisor"
+    "#;
+    agent37.exec_ok(instance_id, script, 30).await?;
+    Ok(())
+}
+
 /// Only non-empty `[A-Za-z0-9._-]` reaches the remote shell.
 fn shell_word(s: &str) -> Result<&str> {
     if s.is_empty() || !s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
