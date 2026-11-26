@@ -52,6 +52,9 @@ pub struct Machine {
     /// T3 Connect is on there: other devices reach it with the user's T3 account.
     #[serde(default)]
     pub connect: bool,
+    /// Enrollment was attempted or a registration was seen. It can outlive the tunnel.
+    #[serde(default)]
+    pub connect_cleanup: bool,
     /// Whether `gh` is authenticated on the instance for private repository clones.
     #[serde(default)]
     pub github_signed_in: bool,
@@ -136,6 +139,17 @@ pub struct State {
 #[serde(rename_all = "camelCase", default)]
 pub struct Doomed {
     pub sandbox: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub links: Option<DeleteLinks>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteLinks {
+    pub name: String,
+    pub environment_id: Option<String>,
+    pub connect: bool,
+    pub attempts: u8,
 }
 
 pub struct Store {

@@ -4,6 +4,11 @@ All notable changes to **t3agent37** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-11-26
+
+### Fixed
+- Deleting an Agent37 machine removes its T3 handoff link and attempts to deregister it from T3 Connect before destroying the VM. Cleanup resumes after a restart and shows manual removal instructions if it cannot confirm success.
+
 ## [0.4.1] - 2026-11-25
 
 ### Fixed

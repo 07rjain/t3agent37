@@ -12,6 +12,7 @@ pub mod signin;
 mod work;
 
 pub use connect::HandoffStatus;
+pub(crate) use connect::deregister_for_delete;
 
 use crate::agent37::{self, Agent37, Instance};
 use crate::proxy::auth::Auth;
@@ -215,6 +216,7 @@ pub struct MachineRuntime {
     adding: Mutex<Vec<projects::MachineProject>>,
     handoff: Mutex<HandoffStatus>,
     connect_operation: tokio::sync::Mutex<()>,
+    pub(crate) peer_link_operation: tokio::sync::Mutex<()>,
 }
 
 impl MachineRuntime {
@@ -241,6 +243,7 @@ impl MachineRuntime {
             adding: Mutex::new(Vec::new()),
             handoff: Mutex::new(HandoffStatus::default()),
             connect_operation: tokio::sync::Mutex::new(()),
+            peer_link_operation: tokio::sync::Mutex::new(()),
         };
         if let Some(shell) = shell {
             this.set_projects_from(&shell);

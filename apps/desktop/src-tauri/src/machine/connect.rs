@@ -2,6 +2,7 @@
 //! user's T3 account, through a tunnel the machine dials out.
 
 use super::{provision, MachineRuntime, Power};
+use crate::agent37::{Agent37, ExecResult};
 use crate::proxy::upstream;
 use anyhow::{bail, Context, Result};
 use reqwest::Method;
@@ -13,6 +14,37 @@ use std::time::{Duration, Instant};
 const SETUP_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const URL_TIMEOUT: Duration = Duration::from_secs(120);
 const TUNNEL_TIMEOUT: Duration = Duration::from_secs(120);
+const CONNECT_SCRIPT: &str = include_str!("connect.sh");
+
+/// Uses the VM's existing CLI authorization so the relay record and host slot can be removed.
+pub(crate) async fn deregister_for_delete(agent37: &Agent37, id: &str) -> Result<()> {
+    let instance = agent37.get(id).await?;
+    if instance.is_starting() {
+        agent37.wait_until_running(id).await?;
+    } else if instance.is_asleep_or_stopped() || instance.is_stopping() {
+        agent37.start(id).await?;
+    }
+    let command = format!("{CONNECT_SCRIPT}\nunlink_connect");
+    let result = agent37.exec(id, &command, None, 45).await?;
+    if !relay_deregistration_completed(&result) {
+        bail!("T3 did not confirm account deregistration");
+    }
+    Ok(())
+}
+
+fn relay_deregistration_completed(result: &ExecResult) -> bool {
+    // T3 exits successfully even if its relay DELETE failed or needs account authorization.
+    // A successful DELETE for an already absent registration has no separate output line.
+    let lines = result.stdout.lines().chain(result.stderr.lines()).map(str::trim);
+    result.exit_code == Some(0)
+        && lines.clone().any(|line| matches!(line,
+            "Revoked the relay-side environment record." | "T3 Connect is disabled locally."
+        ))
+        && !lines.clone().any(|line| matches!(line,
+            "Could not revoke the relay-side environment record yet."
+                | "The relay-side environment record was not revoked."
+        ))
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,7 +68,12 @@ impl MachineRuntime {
         let _operation = self.connect_operation.lock().await;
         self.handoff.lock().unwrap().setting_up = true;
         self.shared.changed();
-        let result = self.enable_connect().await;
+        let mut power = self.subscribe_power();
+        let result = tokio::select! {
+            biased;
+            _ = power.wait_for(|p| *p == Power::Missing) => Err(anyhow::anyhow!("The machine is being deleted.")),
+            result = self.enable_connect() => result,
+        };
         self.handoff.lock().unwrap().setting_up = false;
         self.shared.changed();
         result
@@ -191,8 +228,14 @@ impl MachineRuntime {
             handoff.reachable = reachable;
             changed
         };
-        if self.record().connect != on {
-            self.update_record(|r| r.connect = on);
+        let record = self.record();
+        // Keep the evidence needed for deletion even if the tunnel later goes away.
+        let cleanup = record.connect_cleanup || record.connect || (state["linked"] == true && state["linkRevoked"] != true);
+        if record.connect != on || record.connect_cleanup != cleanup {
+            self.update_record(|r| {
+                r.connect = on;
+                r.connect_cleanup |= cleanup;
+            });
         } else if changed {
             self.shared.changed();
         }
@@ -202,53 +245,36 @@ impl MachineRuntime {
     async fn run_connect_setup(&self) -> Result<()> {
         let id = self.sandbox_id();
         let a37 = &self.shared.agent37;
-        let dir = a37
-            .exec_ok(
-                &id,
-                r#"set -e
-                    d=$(mktemp -d)
-                    (
-                        "$HOME/.local/bin/t3" connect link --headless &
-                        child=$!
-                        printf '%s\n' "$child" >"$d/pid"
-                        status=0
-                        wait "$child" || status=$?
-                        printf '%s\n' "$status" >"$d/exit"
-                    ) </dev/null >"$d/log" 2>&1 &
-                    printf '%s\n' "$d"
-                "#,
-                30,
-            )
-            .await?;
-        let dir = super::github::validate_tmp_dir(dir.lines().last().unwrap_or_default().trim())?;
-        let result = self.finish_connect_setup(&dir).await;
-        let cleanup = format!(r#"
-            d='{dir}'
-            if [ ! -f "$d/exit" ] && read -r pid <"$d/pid"; then
-                case "$pid" in
-                    ''|*[!0-9]*) ;;
-                    *) case "$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)" in
-                        *" connect link --headless "*) kill -TERM "$pid" 2>/dev/null || true ;;
-                    esac ;;
-                esac
-            fi
-            rm -rf "$d"
-        "#);
-        let _ = a37.exec(&id, &cleanup, None, 30).await;
+        // Approval can succeed before a restarted server reports an active tunnel.
+        {
+            let _transition = self.waking.lock().await;
+            if self.power() == Power::Missing {
+                bail!("The machine is being deleted.");
+            }
+            if !self.record().connect_cleanup {
+                self.update_record(|record| record.connect_cleanup = true);
+            }
+        }
+        let start = format!("{CONNECT_SCRIPT}\nstart_connect_setup");
+        let result = match a37.exec_ok(&id, &start, 30).await {
+            Ok(_) => self.finish_connect_setup().await,
+            Err(error) => Err(error),
+        };
+        let cleanup = format!("{CONNECT_SCRIPT}\nclear_connect_setup");
+        let _ = a37.exec_ok(&id, &cleanup, 30).await;
         result
     }
 
-    async fn finish_connect_setup(&self, dir: &str) -> Result<()> {
+    async fn finish_connect_setup(&self) -> Result<()> {
         let id = self.sandbox_id();
         let a37 = &self.shared.agent37;
         let started = Instant::now();
         let mut opened = false;
+        let poll = format!("{CONNECT_SCRIPT}\npoll_connect_setup");
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            let out = a37
-                .exec(&id, &format!("cat '{dir}/exit' 2>/dev/null; echo ---; cat '{dir}/log'"), None, 30)
-                .await?;
-            let (exit, log) = out.stdout.split_once("---").unwrap_or_default();
+            let out = a37.exec_ok(&id, &poll, 30).await?;
+            let (exit, log) = out.split_once("---").unwrap_or_default();
             if !opened
                 && let Some(raw) = log.split_whitespace().find(|w| w.starts_with("https://"))
                 && let Ok(parsed) = url::Url::parse(raw)
@@ -335,6 +361,31 @@ fn last_line(log: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_relay_unlink_warnings_even_when_t3_exits_successfully() {
+        let mut output = ExecResult {
+            exit_code: Some(0),
+            stdout: "T3 Connect is disabled locally.\n".into(),
+            stderr: String::new(),
+        };
+        assert!(relay_deregistration_completed(&output));
+        for warning in [
+            "Could not revoke the relay-side environment record yet.",
+            "The relay-side environment record was not revoked.",
+        ] {
+            output.stderr = format!("{warning}\nSee T3 Connect settings.");
+            assert!(!relay_deregistration_completed(&output));
+        }
+        output.stderr.clear();
+        output.stdout.push_str("Revoked the relay-side environment record.\n");
+        assert!(relay_deregistration_completed(&output));
+        output.exit_code = Some(1);
+        assert!(!relay_deregistration_completed(&output));
+        output.exit_code = Some(0);
+        output.stdout.clear();
+        assert!(!relay_deregistration_completed(&output));
+    }
 
     #[test]
     fn builds_an_https_origin_only_from_a_hostname() {

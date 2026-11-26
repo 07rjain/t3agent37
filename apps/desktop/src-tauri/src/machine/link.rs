@@ -2,7 +2,7 @@
 //! can work on it (`delegate_task`, the thread tools) with nothing to set up. The link goes
 //! through the proxy, like T3 Code itself: a linked machine always answers and wakes when used.
 
-use super::MachineRuntime;
+use super::{MachineRuntime, Power};
 use anyhow::Result;
 use serde::Deserialize;
 use serde_json::json;
@@ -20,8 +20,9 @@ impl MachineRuntime {
     /// Links the running machine, unless it is linked for a while yet or the user keeps linked
     /// environments off in T3 Code.
     pub async fn ensure_linked(&self) -> Result<()> {
+        let _link = self.peer_link_operation.lock().await;
         let t3 = &self.shared.t3;
-        if !t3.links_enabled() {
+        if self.power() == Power::Missing || !t3.links_enabled() {
             return Ok(());
         }
         let record = self.record();

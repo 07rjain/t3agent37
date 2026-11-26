@@ -2,9 +2,9 @@
 //! UI-agnostic; the Tauri tray app and the headless `t3agent37-daemon` both drive it.
 
 use crate::agent37::{self, Agent37, BillingInfo, InstanceType, Region};
-use crate::machine::{provision, DiskUsage, Event, HandoffStatus, MachineRuntime, Power, Shared, WatchdogPhase};
+use crate::machine::{deregister_for_delete, provision, DiskUsage, Event, HandoffStatus, MachineRuntime, Power, Shared, WatchdogPhase};
 use crate::proxy;
-use crate::store::{Doomed, Settings, Spend, State, Store};
+use crate::store::{DeleteLinks, Doomed, Settings, Spend, State, Store};
 use crate::t3desktop::T3Desktop;
 use crate::telemetry::{Milestone, Telemetry};
 use anyhow::{anyhow, bail, Context, Result};
@@ -23,6 +23,8 @@ const PORTS: u16 = 1000;
 const REAP_RETRY: Duration = Duration::from_secs(60);
 /// Pending this long since this launch first tried it: the user is told, and it is tried on.
 const REAP_WARN: Duration = Duration::from_secs(15 * 60);
+const DELETE_LINK_ATTEMPTS: u8 = 2;
+const DELETE_CONNECT_TIMEOUT: Duration = Duration::from_secs(150);
 
 #[derive(Default)]
 pub struct CreateOptions {
@@ -148,7 +150,7 @@ struct Creating {
 impl Creating {
     fn doomed(&self) -> Option<Doomed> {
         let id = self.sandbox.as_ref()?;
-        Some(Doomed { sandbox: Some(id.clone()) })
+        Some(Doomed { sandbox: Some(id.clone()), links: None })
     }
 }
 
@@ -166,6 +168,7 @@ struct Running {
 pub struct App {
     pub shared: Arc<Shared>,
     store: Store,
+    save_lock: Mutex<()>,
     data_dir: PathBuf,
     machines: RwLock<Vec<Running>>,
     creating: Mutex<Vec<Creating>>,
@@ -217,6 +220,7 @@ impl App {
         let app = Arc::new(Self {
             shared,
             store,
+            save_lock: Mutex::new(()),
             data_dir,
             machines: RwLock::new(Vec::new()),
             creating: Mutex::new(Vec::new()),
@@ -250,7 +254,10 @@ impl App {
     }
 
     async fn reap_pass(&self, reaping: &mut HashMap<String, Reaping>) -> bool {
-        let doomed = self.doomed.lock().unwrap().clone();
+        let doomed = {
+            let _save = self.save_lock.lock().unwrap();
+            self.doomed.lock().unwrap().clone()
+        };
         if doomed.is_empty() {
             return false;
         }
@@ -262,9 +269,24 @@ impl App {
             .inspect_err(|e| tracing::warn!("listing Agent37 instances to confirm deletes: {e:#}"))
             .ok();
         let mut confirmed = false;
-        for item in doomed {
-            let Some(id) = &item.sandbox else { continue };
-            let done = self.reap_one(reaping, id, listed.as_deref(), a37.delete(id)).await;
+        for mut item in doomed {
+            let Some(id) = item.sandbox.clone() else { continue };
+            if let Some(links) = item.links.clone() {
+                let gone = listed.as_ref().is_some_and(|ids| !ids.contains(&id));
+                let remaining = self.clean_delete_links(&id, links, gone).await;
+                {
+                    let mut doomed = self.doomed.lock().unwrap();
+                    if let Some(job) = doomed.iter_mut().find(|job| **job == item) {
+                        job.links = remaining.clone();
+                    }
+                }
+                item.links = remaining;
+                self.save();
+                if item.links.is_some() {
+                    continue;
+                }
+            }
+            let done = self.reap_one(reaping, &id, listed.as_deref(), a37.delete(&id)).await;
             if done {
                 confirmed = true;
                 let mut doomed = self.doomed.lock().unwrap();
@@ -277,6 +299,38 @@ impl App {
             self.shared.persist();
         }
         !self.doomed.lock().unwrap().is_empty()
+    }
+
+    async fn clean_delete_links(&self, id: &str, mut links: DeleteLinks, gone: bool) -> Option<DeleteLinks> {
+        if let Some(environment_id) = &links.environment_id {
+            match self.shared.t3.unlink(environment_id).await {
+                Ok(()) => links.environment_id = None,
+                Err(e) => tracing::warn!("unlinking deleted machine {id} from T3 Code: {e:#}"),
+            }
+        }
+        if links.connect && !gone {
+            match tokio::time::timeout(DELETE_CONNECT_TIMEOUT, deregister_for_delete(&self.shared.agent37, id)).await {
+                Ok(Ok(())) => links.connect = false,
+                Ok(Err(e)) => tracing::warn!("deregistering deleted machine {id} from T3 Connect: {e:#}"),
+                Err(_) => tracing::warn!("deregistering deleted machine {id} from T3 Connect timed out"),
+            }
+        }
+        links.attempts = links.attempts.saturating_add(1);
+        if links.connect && (gone || links.attempts >= DELETE_LINK_ATTEMPTS) {
+            self.shared.notify(
+                format!("Check {} in T3 Connect", links.name),
+                "Boat could not confirm deregistration. If the machine still appears in your T3 Connect account, use Deregister to remove it.",
+            );
+            links.connect = false;
+        }
+        if links.environment_id.is_some() && links.attempts >= DELETE_LINK_ATTEMPTS {
+            self.shared.notify(
+                format!("Unlink {} in T3 Code", links.name),
+                "Boat could not remove the handoff link. Remove the linked environment in T3 Code.",
+            );
+            links.environment_id = None;
+        }
+        (links.environment_id.is_some() || links.connect).then_some(links)
     }
 
     async fn reap_one(
@@ -355,15 +409,19 @@ impl App {
     }
 
     pub fn save(&self) {
+        let _save = self.save_lock.lock().unwrap();
+        if let Err(e) = self.store.save(&self.state()) {
+            tracing::error!("saving state: {e:#}");
+        }
+    }
+
+    fn state(&self) -> State {
         let spend = self.spend.lock().unwrap().clone();
         let retired_ports = self.retired_ports.lock().unwrap().clone();
         let creating: Vec<Doomed> = self.creating.lock().unwrap().iter().filter_map(Creating::doomed).collect();
         let machines = self.machines().iter().map(|m| m.record()).collect();
         let doomed = self.doomed.lock().unwrap().iter().cloned().chain(creating).collect();
-        let state = State { machines, settings: self.settings(), spend, retired_ports, doomed };
-        if let Err(e) = self.store.save(&state) {
-            tracing::error!("saving state: {e:#}");
-        }
+        State { machines, settings: self.settings(), spend, retired_ports, doomed }
     }
 
     pub fn update_settings(&self, mut settings: Settings) {
@@ -559,6 +617,7 @@ impl App {
     }
 
     pub async fn delete_machine(&self, machine: &MachineRuntime, discard: bool) -> Result<()> {
+        let _link = machine.peer_link_operation.lock().await;
         let (day, month) = periods();
         self.accrue_spend(machine, day, month, chrono::Utc::now().timestamp());
         if !discard {
@@ -566,27 +625,41 @@ impl App {
         }
         let record = {
             let _waking = machine.waking.lock().await;
+            let _save = self.save_lock.lock().unwrap();
+            let record = machine.record();
+            let mut state = self.state();
+            let Some(index) = state.machines.iter().position(|r| r.id == record.id) else {
+                return Ok(());
+            };
+            let job = Doomed {
+                sandbox: Some(record.sandbox_id.clone()),
+                links: Some(DeleteLinks {
+                    name: record.name.clone(),
+                    environment_id: Some(record.environment_id.clone()),
+                    connect: record.connect || record.connect_cleanup,
+                    attempts: 0,
+                }),
+            };
+            state.machines.remove(index);
+            state.doomed.push(job.clone());
+            state.retired_ports.push(record.local_port);
+            self.store.save(&state).context("saving pending machine deletion")?;
+
             machine.retire();
-            machine.record()
+            let running = {
+                let mut machines = self.machines.write().unwrap();
+                machines.iter().position(|r| r.machine.id() == record.id).map(|i| machines.remove(i))
+            };
+            if let Some(running) = running {
+                running.tasks.iter().for_each(JoinHandle::abort);
+            }
+            self.doomed.lock().unwrap().push(job);
+            self.retired_ports.lock().unwrap().push(record.local_port);
+            record
         };
-        let id = record.id.as_str();
-        self.doomed.lock().unwrap().push(Doomed { sandbox: Some(record.sandbox_id.clone()) });
-        let running = {
-            let mut machines = self.machines.write().unwrap();
-            let idx = machines.iter().position(|r| r.machine.id() == id);
-            idx.map(|i| machines.remove(i))
-        };
-        if let Some(r) = running {
-            r.tasks.iter().for_each(JoinHandle::abort);
-        }
-        self.retired_ports.lock().unwrap().push(record.local_port);
-        self.shared.persist();
         self.shared.changed();
         self.reaper.notify_one();
         let _ = std::fs::remove_dir_all(machine.dir());
-        if let Err(e) = self.shared.t3.unlink(&record.environment_id).await {
-            tracing::warn!("unlinking {id} from T3 Code: {e:#}");
-        }
         if !record.client_tokens.is_empty() {
             self.shared.notify(
                 format!("Remove {} from T3 Code", record.name),
@@ -1130,11 +1203,12 @@ mod tests {
         let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
         let t3 = T3Desktop::at(dir.join("t3"));
         let app = App::new(a37, t3, dir.clone(), events).unwrap();
+        tokio::task::yield_now().await;
 
         app.doomed.lock().unwrap().extend([
-            Doomed { sandbox: Some("inst_a".into()) },
-            Doomed { sandbox: Some("inst_stuck".into()) },
-            Doomed { sandbox: Some("inst_ghost".into()) },
+            Doomed { sandbox: Some("inst_a".into()), links: None },
+            Doomed { sandbox: Some("inst_stuck".into()), links: None },
+            Doomed { sandbox: Some("inst_ghost".into()), links: None },
         ]);
 
         // Pass 1: list fails, all deletes still attempted, nothing dropped.
@@ -1153,5 +1227,92 @@ mod tests {
         assert_eq!(remaining, vec!["inst_stuck"]);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reaper_retries_connect_before_deleting_and_saves_completed_steps() {
+        use axum::routing::post;
+        use std::os::unix::fs::PermissionsExt;
+
+        #[derive(Default)]
+        struct MockApi {
+            calls: Mutex<Vec<&'static str>>,
+        }
+        let api = Arc::new(MockApi::default());
+        let vm = |awake| json!({ "id": "vm", "status": if awake { "running" } else { "sleeping" } });
+        let router = Router::new()
+            .route("/v1/instances", get(move || async move { Json(json!([vm(false)])) }))
+            .route(
+                "/v1/instances/vm",
+                get(move |AxumState(api): AxumState<Arc<MockApi>>| async move {
+                    Json(vm(api.calls.lock().unwrap().contains(&"wake")))
+                }).delete(|AxumState(api): AxumState<Arc<MockApi>>| async move {
+                    api.calls.lock().unwrap().push("delete");
+                    StatusCode::NO_CONTENT
+                }),
+            )
+            .route(
+                "/v1/instances/vm/start",
+                post(move |AxumState(api): AxumState<Arc<MockApi>>| async move {
+                    api.calls.lock().unwrap().push("wake");
+                    Json(vm(true))
+                }),
+            )
+            .route(
+                "/v1/instances/vm/exec",
+                post(|AxumState(api): AxumState<Arc<MockApi>>, Json(body): Json<serde_json::Value>| async move {
+                    assert!(body["command"].as_str().unwrap().ends_with("\nunlink_connect"));
+                    let mut calls = api.calls.lock().unwrap();
+                    let first = !calls.contains(&"unlink-connect");
+                    calls.push("unlink-connect");
+                    if first {
+                        Json(json!({
+                            "exitCode": 0,
+                            "stdout": "T3 Connect is disabled locally.\n",
+                            "stderr": "Could not revoke the relay-side environment record yet.\n",
+                        }))
+                    } else {
+                        Json(json!({ "exitCode": 0, "stdout": "Revoked the relay-side environment record.\n" }))
+                    }
+                }),
+            )
+            .with_state(api.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let dir = std::env::temp_dir().join(format!("t3agent37-delete-links-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cli = dir.join("t3");
+        std::fs::write(&cli, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/unlinks.log\"\n").unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let agent37 = Agent37::with_endpoints("sk_test".into(), base.clone(), base, String::new()).unwrap();
+        let (events, _rx) = mpsc::unbounded_channel();
+        let app = App::new(agent37, T3Desktop::at(cli), dir.clone(), events).unwrap();
+        tokio::task::yield_now().await;
+        app.doomed.lock().unwrap().push(Doomed {
+            sandbox: Some("vm".into()),
+            links: Some(DeleteLinks {
+                name: "test VM".into(),
+                environment_id: Some("env".into()),
+                connect: true,
+                attempts: 0,
+            }),
+        });
+        let mut reaping = HashMap::new();
+        assert!(app.reap_pass(&mut reaping).await);
+        assert_eq!(*api.calls.lock().unwrap(), ["wake", "unlink-connect"]);
+        let saved = Store::new(&dir).load().unwrap().doomed;
+        let pending = saved[0].links.as_ref().unwrap();
+        assert_eq!(pending.attempts, 1);
+        assert!(pending.connect && pending.environment_id.is_none());
+
+        *app.doomed.lock().unwrap() = saved;
+        assert!(app.reap_pass(&mut reaping).await);
+        assert_eq!(*api.calls.lock().unwrap(), ["wake", "unlink-connect", "unlink-connect", "delete"]);
+        assert_eq!(std::fs::read_to_string(dir.join("unlinks.log")).unwrap(), "environment unlink env\n");
+        assert!(Store::new(&dir).load().unwrap().doomed[0].links.is_none());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -96,11 +96,11 @@ impl T3Desktop {
     /// Runs the CLI's `environment` command: links live in the desktop app's database, which the
     /// CLI opens itself, so this works whether or not the app runs.
     async fn environment(&self, args: &[&str]) -> Result<Vec<u8>> {
-        let out = command(&self.cli)
-            .arg("environment")
-            .args(args)
-            .output()
+        let mut cmd = command(&self.cli);
+        cmd.arg("environment").args(args).kill_on_drop(true);
+        let out = tokio::time::timeout(Duration::from_secs(30), cmd.output())
             .await
+            .context("T3 environment command timed out")?
             .context("running t3 environment")?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
